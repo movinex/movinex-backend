@@ -118,6 +118,29 @@ app.post('/api/mdm/command', (req: Request, res: Response) => {
   });
 });
 
+// POST: Proxy para reenviar la verificación de cliente a n8n de manera segura sin CORS (Simulación con Timeout)
+app.post('/api/webhooks/verificacion-cliente', async (req: Request, res: Response) => {
+  try {
+    console.log('Iniciando simulación de verificación KYC...');
+    
+    // Simular un retraso/timeout de 3 segundos para el análisis biométrico
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    console.log('Simulación completada con éxito. Cliente verificado.');
+
+    // Responder con un JSON de éxito idéntico a una validación real
+    return res.status(200).json({
+      success: true,
+      score: 0.98,
+      status: "APPROVED",
+      message: "Verificación de identidad simulada exitosamente."
+    });
+  } catch (error: any) {
+    console.error('Error en simulación:', error);
+    return res.status(500).json({ error: 'Error al conectar con el servidor de verificación.' });
+  }
+});
+
 // Iniciar servidor
 app.listen(PORT, () => {
   console.log(`🚀 Servidor de Movinex corriendo de manera segura en http://localhost:${PORT}`);
