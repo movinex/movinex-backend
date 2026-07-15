@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { PersistenceService } from './persistenceService';
+import { VerificamexService } from './verificamexService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 
 dotenv.config();
@@ -49,10 +50,33 @@ app.get('/api/celulares', async (req: Request, res: Response) => {
 // POST: Crear solicitud de crédito de manera segura
 app.post('/api/solicitudes', async (req: Request, res: Response) => {
   try {
-    const solicitud = await PersistenceService.saveSolicitud(req.body);
+    const { cliente, celular, email } = req.body;
+
+    console.log(`[Backend] Procesando nueva solicitud para: ${cliente} (${celular})`);
+
+    // 1. Validar el teléfono usando Verificamex
+    const kycResult = await VerificamexService.validarTelefono(celular);
+    
+    // Si es válido, se aprueba de inmediato. Si no, queda como 'Pendiente' (o 'Rechazado' según política)
+    // Para la demo, todas las solicitudes están aprobadas mientras verificamex de autorizado (valido === true).
+    const estatusInicial = kycResult.valido ? 'Aprobado' : 'Pendiente';
+
+    // 2. Si no es autorizado, enviar alerta por email a info@movinex.mx (simulado por consola en backend)
+    if (!kycResult.valido) {
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a info@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex.`);
+    }
+
+    // 3. Guardar en base de datos con el estatus dictaminado
+    const solicitud = await PersistenceService.saveSolicitud({
+      ...req.body,
+      estatus: estatusInicial
+    });
+
     return res.status(201).json({
       success: true,
-      message: 'Solicitud de crédito registrada con éxito.',
+      message: kycResult.valido 
+        ? 'Solicitud de crédito aprobada y registrada con éxito.' 
+        : 'Solicitud registrada. Requiere verificación adicional.',
       solicitud
     });
   } catch (error: any) {
@@ -118,7 +142,7 @@ app.post('/api/mdm/command', (req: Request, res: Response) => {
   });
 });
 
-// POST: Proxy para reenviar la verificación de cliente a n8n de manera segura sin CORS (Simulación con Timeout)
+// POST: Verificación de identidad del cliente (respuesta simulada, hardcodeada)
 app.post('/api/webhooks/verificacion-cliente', async (req: Request, res: Response) => {
   try {
     console.log('Iniciando simulación de verificación KYC...');

@@ -21,7 +21,7 @@ export class PersistenceService {
           ine_frente: datos.ine_frente,
           ine_reverso: datos.ine_reverso,
           selfie: datos.selfie,
-          estatus: 'Pendiente'
+          estatus: datos.estatus || 'Pendiente'
         }
       ])
       .select();
