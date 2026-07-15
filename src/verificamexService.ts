@@ -5,7 +5,7 @@ import axios from 'axios';
  */
 export class VerificamexService {
   private static API_KEY = process.env.VERIFICAMEX_API_KEY;
-  private static BASE_URL = 'https://api.verificamex.com/v1'; // Endpoint estándar de Verificamex
+  private static BASE_URL = 'https://api.verificamex.com/identity/v1'; // Endpoint estándar de Verificamex
 
   /**
    * Valida un número telefónico utilizando el servicio de Verificamex.
