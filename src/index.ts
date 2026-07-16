@@ -11,7 +11,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const CONEKTA_WEBHOOK_SECRET = process.env.CONEKTA_WEBHOOK_SECRET || 'supersecretwebhookkey';
+const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
 // Middleware de seguridad y parseo
@@ -25,6 +25,85 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
+
+// GET: Playground interactivo para simular cobro de enganches
+app.get('/playground', (req: Request, res: Response) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+      <meta charset="UTF-8">
+      <title>Movinex - Simulador de Pagos (Conekta)</title>
+      <style>
+        body { font-family: sans-serif; background: #0f172a; color: #f1f5f9; padding: 40px; }
+        .card { background: #1e293b; padding: 24px; border-radius: 12px; max-width: 600px; margin: auto; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+        h1 { color: #38bdf8; margin-top: 0; }
+        input, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; }
+        button { background: #0284c7; cursor: pointer; border: none; font-weight: bold; }
+        button:hover { background: #0369a1; }
+        #logs { background: #020617; padding: 15px; border-radius: 6px; font-family: monospace; height: 150px; overflow-y: auto; color: #a7f3d0; margin-top: 20px; white-space: pre-wrap; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>⚡ Movinex Backend Playground</h1>
+        <p>Esta herramienta permite simular la confirmación de pago (Webhook order.paid) para pruebas rápidas.</p>
+        
+        <label>Contacto del Cliente (Email o Celular):</label>
+        <input type="text" id="contacto" placeholder="ejemplo@correo.com o 5512345678" required>
+        
+        <label>Monto de Pago Simulado ($ MXN):</label>
+        <input type="number" id="monto" value="375">
+        
+        <button onclick="enviarPago()">Simular Pago Exitoso (order.paid)</button>
+        
+        <div id="logs">Consola del simulador...</div>
+      </div>
+
+      <script>
+        async function enviarPago() {
+          const contacto = document.getElementById('contacto').value.trim();
+          const monto = document.getElementById('monto').value;
+          const logs = document.getElementById('logs');
+          
+          if(!contacto) {
+            alert('Ingresa el email o celular del cliente.');
+            return;
+          }
+          
+          logs.innerHTML += '\\n[Simulador] Desencadenando webhook order.paid...';
+          
+          try {
+            const res = await fetch('/api/webhooks/conekta', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: 'order.paid',
+                data: {
+                  object: {
+                    id: 'ord_simulated_' + Math.floor(Math.random() * 100000),
+                    amount: parseFloat(monto) * 100,
+                    customer_info: {
+                      name: 'Cliente Simulador',
+                      email: contacto.includes('@') ? contacto : 'simulado@movinex.mx',
+                      phone: !contacto.includes('@') ? contacto : '5500000000'
+                    }
+                  }
+                }
+              })
+            });
+            const data = await res.json();
+            logs.innerHTML += '\\n[Respuesta Servidor] ' + JSON.stringify(data);
+          } catch(err) {
+            logs.innerHTML += '\\n[Error] ' + err.message;
+          }
+        }
+      </script>
+    </body>
+    </html>
+  `);
+});
+
 
 // GET: Obtener todas las solicitudes para el Backoffice
 app.get('/api/solicitudes', async (req: Request, res: Response) => {
@@ -127,8 +206,8 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
   const signature = req.headers['x-conekta-signature'] as string;
   const rawBody = JSON.stringify(req.body);
 
-  // Validación de firma HMAC (seguridad para comprobar origen legítimo)
-  const isValid = verifyConektaSignature(rawBody, signature, CONEKTA_WEBHOOK_SECRET);
+  // Validación de firma HMAC usando llave pública RSA de Conekta
+  const isValid = verifyConektaSignature(rawBody, signature, CONEKTA_PUBLIC_KEY);
 
   if (!isValid) {
     console.warn('[Conekta Webhook] Firma de webhook de Conekta inválida.');
