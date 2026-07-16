@@ -6,6 +6,8 @@ import { PersistenceService } from './persistenceService';
 import { VerificamexService } from './verificamexService';
 import { ConektaService } from './conektaService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
+import swaggerUi from 'swagger-ui-express';
+import swaggerJsdoc from 'swagger-jsdoc';
 
 dotenv.config();
 
@@ -104,8 +106,43 @@ app.get('/playground', (req: Request, res: Response) => {
   `);
 });
 
+// Configuración dinámica de Swagger para listar y probar los Endpoints de la API
+const swaggerOptions: swaggerJsdoc.Options = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'Movinex Core API',
+      version: '1.0.0',
+      description: 'Documentación interactiva de endpoints para integraciones (Conekta, Verificamex, Upya, MDM)',
+    },
+    servers: [
+      {
+        url: 'https://movinex-backend-production.up.railway.app',
+        description: 'Servidor de Producción en Railway'
+      },
+      {
+        url: 'http://localhost:5000',
+        description: 'Entorno de Desarrollo Local'
+      }
+    ],
+  },
+  apis: ['./src/index.ts', './dist/index.js'] // Soporte para TypeScript y JS compilado
+};
 
-// GET: Obtener todas las solicitudes para el Backoffice
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve as any, swaggerUi.setup(swaggerSpec) as any);
+
+
+
+/**
+ * @swagger
+ * /api/solicitudes:
+ *   get:
+ *     summary: Obtener todas las solicitudes para el Backoffice
+ *     responses:
+ *       200:
+ *         description: Lista de solicitudes crediticias registradas.
+ */
 app.get('/api/solicitudes', async (req: Request, res: Response) => {
   try {
     const solicitudes = await PersistenceService.getSolicitudes();
@@ -116,7 +153,15 @@ app.get('/api/solicitudes', async (req: Request, res: Response) => {
   }
 });
 
-// GET: Obtener catálogo de celulares desde Supabase
+/**
+ * @swagger
+ * /api/celulares:
+ *   get:
+ *     summary: Obtener catálogo de celulares desde Supabase
+ *     responses:
+ *       200:
+ *         description: Catálogo completo de teléfonos móviles de la tienda.
+ */
 app.get('/api/celulares', async (req: Request, res: Response) => {
   try {
     const celulares = await PersistenceService.getCelulares();
@@ -127,7 +172,38 @@ app.get('/api/celulares', async (req: Request, res: Response) => {
   }
 });
 
-// POST: Crear solicitud de crédito de manera segura
+/**
+ * @swagger
+ * /api/solicitudes:
+ *   post:
+ *     summary: Crear solicitud de crédito de manera segura
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - cliente
+ *               - celular
+ *               - email
+ *               - modelo
+ *               - enganche
+ *             properties:
+ *               cliente:
+ *                 type: string
+ *               celular:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               modelo:
+ *                 type: string
+ *               enganche:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Solicitud creada con éxito y link de checkout generado.
+ */
 app.post('/api/solicitudes', async (req: Request, res: Response) => {
   try {
     const { cliente, celular, email } = req.body;
@@ -183,7 +259,31 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
   }
 });
 
-// PATCH: Actualizar estatus (Aprobar/Rechazar) desde el Backoffice
+/**
+ * @swagger
+ * /api/solicitudes/{id}:
+ *   patch:
+ *     summary: Actualizar estatus (Aprobar/Rechazar) desde el Backoffice
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               estatus:
+ *                 type: string
+ *                 enum: [Aprobado, Rechazado]
+ *     responses:
+ *       200:
+ *         description: Estatus actualizado.
+ */
 app.patch('/api/solicitudes/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
