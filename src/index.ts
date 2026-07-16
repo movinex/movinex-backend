@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { PersistenceService } from './persistenceService';
 import { VerificamexService } from './verificamexService';
+import { ConektaService } from './conektaService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 
 dotenv.config();
@@ -66,10 +67,27 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
       console.warn(`[ALERTA DE RIESGO] Envío de alerta a info@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex.`);
     }
 
-    // 3. Guardar en base de datos con el estatus dictaminado
+    // 3. Generar Link de Pago en Conekta para el enganche
+    let checkoutUrl = '';
+    try {
+      checkoutUrl = await ConektaService.crearCheckoutEnganche(
+        cliente,
+        email,
+        celular,
+        req.body.modelo,
+        Number(req.body.enganche)
+      );
+    } catch (conektaError: any) {
+      console.error('[Conekta] No se pudo generar el link de pago:', conektaError.message);
+      // fallback temporal por si hay algún problema con la API Key en modo pruebas
+      checkoutUrl = 'https://pay.conekta.com/checkout/simulado-tests';
+    }
+
+    // 4. Guardar en base de datos con el estatus dictaminado y la URL de pago
     const solicitud = await PersistenceService.saveSolicitud({
       ...req.body,
-      estatus: estatusInicial
+      estatus: estatusInicial,
+      checkout_url: checkoutUrl
     });
 
     return res.status(201).json({
@@ -77,7 +95,8 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
       message: kycResult.valido 
         ? 'Solicitud de crédito aprobada y registrada con éxito.' 
         : 'Solicitud registrada. Requiere verificación adicional.',
-      solicitud
+      solicitud,
+      checkoutUrl
     });
   } catch (error: any) {
     console.error('Error procesando solicitud:', error);
@@ -104,22 +123,50 @@ app.patch('/api/solicitudes/:id', async (req: Request, res: Response) => {
 });
 
 // POST: Endpoint seguro para recibir webhooks de Conekta (Verificamex/Pagos) con validación HMAC
-app.post('/api/webhooks/conekta', (req: Request, res: Response) => {
+app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
   const signature = req.headers['x-conekta-signature'] as string;
   const rawBody = JSON.stringify(req.body);
 
+  // Validación de firma HMAC (seguridad para comprobar origen legítimo)
   const isValid = verifyConektaSignature(rawBody, signature, CONEKTA_WEBHOOK_SECRET);
 
   if (!isValid) {
-    console.warn('Firma de webhook de Conekta inválida.');
+    console.warn('[Conekta Webhook] Firma de webhook de Conekta inválida.');
     return res.status(401).json({ error: 'Firma de webhook inválida' });
   }
 
-  // Procesar evento (por ejemplo, pago aprobado)
   const event = req.body;
-  console.log('Webhook de Conekta verificado con éxito:', event.type);
+  console.log('[Conekta Webhook] Evento recibido y verificado:', event.type);
 
-  return res.status(200).json({ received: true });
+  try {
+    // Si el evento indica que una orden fue pagada con éxito
+    if (event.type === 'order.paid') {
+      const order = event.data.object;
+      const customerInfo = order.customer_info;
+      const email = customerInfo?.email;
+      const phone = customerInfo?.phone;
+
+      console.log(`[Conekta Webhook] Orden pagada con éxito: ${order.id}. Monto: $${(order.amount / 100).toFixed(2)} MXN`);
+      console.log(`[Conekta Webhook] Cliente: ${customerInfo?.name}. Contacto: ${email} / ${phone}`);
+
+      // Intentar actualizar el estatus de la solicitud a 'Aprobado' o 'Pagado' en Supabase
+      if (email || phone) {
+        const identificador = email || phone;
+        const solicitudesActualizadas = await PersistenceService.updateEstatusByContacto(identificador, 'Aprobado');
+        
+        if (solicitudesActualizadas && solicitudesActualizadas.length > 0) {
+          console.log(`[Conekta Webhook] Se actualizaron ${solicitudesActualizadas.length} solicitudes del cliente a 'Aprobado'.`);
+        } else {
+          console.warn(`[Conekta Webhook] No se encontró ninguna solicitud de crédito que coincida con el contacto: ${identificador}`);
+        }
+      }
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (webhookError: any) {
+    console.error('[Conekta Webhook] Error al procesar webhook:', webhookError.message);
+    return res.status(500).json({ error: 'Error procesando webhook' });
+  }
 });
 
 // POST: Enviar comando de bloqueo/desbloqueo a dispositivo (MDM) firmado criptográficamente con JWT
