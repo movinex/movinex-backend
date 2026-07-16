@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { PersistenceService } from './persistenceService';
 import { VerificamexService } from './verificamexService';
 import { ConektaService } from './conektaService';
+import { SkydropxService } from './skydropxService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
@@ -331,7 +332,41 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
       // Intentar actualizar el estatus de la solicitud a 'Aprobado' o 'Pagado' en Supabase
       if (email || phone) {
         const identificador = email || phone;
-        const solicitudesActualizadas = await PersistenceService.updateEstatusByContacto(identificador, 'Aprobado');
+        
+        // 1. Obtener los datos actuales de la solicitud para el envío
+        const solicitudes = await PersistenceService.getSolicitudes();
+        const solicitud = solicitudes.find((s: any) => s.email === email || s.celular.includes(phone.slice(-10)));
+
+        let trackingNumber = null;
+
+        if (solicitud) {
+          console.log(`[Conekta Webhook] Solicitud encontrada para envío. Cliente: ${solicitud.cliente}. Destino: CP ${solicitud.codigo_postal || 'Sin CP'}`);
+          
+          // 2. Generar el envío automático en Skydropx
+          const cpDestino = solicitud.codigo_postal || '06600';
+          const direccionDestino = solicitud.direccion_envio || 'Domicilio conocido';
+          
+          const skydropxResponse = await SkydropxService.crearEnvio(
+            solicitud.cliente,
+            solicitud.celular,
+            solicitud.email,
+            cpDestino,
+            direccionDestino,
+            solicitud.modelo
+          );
+
+          trackingNumber = skydropxResponse?.data?.attributes?.tracking_number || 
+                           skydropxResponse?.data?.tracking_number || null;
+
+          console.log(`[Conekta Webhook] Envío cotizado y programado en Skydropx. Guía/Tracking: ${trackingNumber}`);
+        }
+
+        // 3. Actualizar la solicitud a aprobada y guardar el tracking
+        const solicitudesActualizadas = await PersistenceService.updateEstatusByContacto(
+          identificador, 
+          'Aprobado', 
+          { tracking_number: trackingNumber }
+        );
         
         if (solicitudesActualizadas && solicitudesActualizadas.length > 0) {
           console.log(`[Conekta Webhook] Se actualizaron ${solicitudesActualizadas.length} solicitudes del cliente a 'Aprobado'.`);

@@ -22,7 +22,10 @@ export class PersistenceService {
           ine_reverso: datos.ine_reverso,
           selfie: datos.selfie,
           estatus: datos.estatus || 'Pendiente',
-          checkout_url: datos.checkout_url || null
+          checkout_url: datos.checkout_url || null,
+          codigo_postal: datos.codigo_postal || null,
+          direccion_envio: datos.direccion_envio || null,
+          tracking_number: datos.tracking_number || null
         }
       ])
       .select();
@@ -42,14 +45,19 @@ export class PersistenceService {
     return data[0];
   }
 
-  static async updateEstatusByContacto(contacto: string, nuevoEstatus: string) {
+  static async updateEstatusByContacto(contacto: string, nuevoEstatus: string, extraData?: any) {
     // Intentar buscar tanto por email como por celular (limpiando formato de país)
     const telefonoLimpio = contacto.replace(/\D/g, '');
     const telefonoSinPrefijo = telefonoLimpio.slice(-10); // Últimos 10 dígitos
 
+    const updateFields: any = { estatus: nuevoEstatus };
+    if (extraData?.tracking_number) {
+      updateFields.tracking_number = extraData.tracking_number;
+    }
+
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ estatus: nuevoEstatus })
+      .update(updateFields)
       .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
       .select();
 
