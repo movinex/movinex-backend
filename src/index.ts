@@ -7,6 +7,7 @@ import { VerificamexService } from './verificamexService';
 import { ConektaService } from './conektaService';
 import { SkydropxService } from './skydropxService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
+import { SuperadminService } from './superadminService';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
 
@@ -299,6 +300,61 @@ app.patch('/api/solicitudes/:id', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error actualizando estatus:', error);
     return res.status(500).json({ error: error.message || 'Error al actualizar estatus.' });
+  }
+});
+
+// POST: Login para Super Administradores
+app.post('/api/admin/login', async (req: Request, res: Response) => {
+  try {
+    const { usuario, clave } = req.body;
+    if (!usuario || !clave) {
+      return res.status(400).json({ success: false, message: 'Usuario y clave requeridos.' });
+    }
+
+    const authResult = await SuperadminService.login(usuario, clave);
+    if (!authResult.success) {
+      return res.status(401).json(authResult);
+    }
+
+    return res.status(200).json(authResult);
+  } catch (error: any) {
+    console.error('Error en login superadmin:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Error en el servidor.' });
+  }
+});
+
+// POST: Crear nuevo celular en el catálogo
+app.post('/api/celulares', async (req: Request, res: Response) => {
+  try {
+    const celular = await PersistenceService.createCelular(req.body);
+    return res.status(201).json({ success: true, celular });
+  } catch (error: any) {
+    console.error('Error creando celular:', error);
+    return res.status(500).json({ error: error.message || 'Error al crear celular.' });
+  }
+});
+
+// PUT: Actualizar celular del catálogo
+app.put('/api/celulares/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const celular = await PersistenceService.updateCelular(id, req.body);
+    return res.status(200).json({ success: true, celular });
+  } catch (error: any) {
+    console.error('Error editando celular:', error);
+    return res.status(500).json({ error: error.message || 'Error al actualizar celular.' });
+  }
+});
+
+// DELETE: Eliminar celular del catálogo
+app.delete('/api/celulares/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await PersistenceService.deleteCelular(id);
+    return res.status(200).json({ success: true, message: 'Celular eliminado con éxito.' });
+  } catch (error: any) {
+    console.error('Error eliminando celular:', error);
+    return res.status(500).json({ error: error.message || 'Error al eliminar celular.' });
   }
 });
 

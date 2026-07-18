@@ -78,9 +78,65 @@ export class PersistenceService {
   static async getCelulares() {
     const { data, error } = await supabase
       .from('celulares')
-      .select('*');
+      .select('*')
+      .order('created_at', { ascending: false });
 
     if (error) throw error;
     return data;
+  }
+
+  static async createCelular(datos: any) {
+    const { data, error } = await supabase
+      .from('celulares')
+      .insert([
+        {
+          id: datos.id,
+          modelo: datos.modelo,
+          marca: datos.marca,
+          precio_base: Number(datos.precio_base),
+          enganche: Number(datos.enganche),
+          monto_semanal_26: Number(datos.monto_semanal_26),
+          monto_semanal_52: Number(datos.monto_semanal_52),
+          imagen_url: datos.imagen_url,
+          envio_gratis: datos.envio_gratis !== false, // default true
+          costo_envio: Number(datos.costo_envio || 0)
+        }
+      ])
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async updateCelular(id: string, datos: any) {
+    const { data, error } = await supabase
+      .from('celulares')
+      .update({
+        modelo: datos.modelo,
+        marca: datos.marca,
+        precio_base: Number(datos.precio_base),
+        enganche: Number(datos.enganche),
+        monto_semanal_26: Number(datos.monto_semanal_26),
+        monto_semanal_52: Number(datos.monto_semanal_52),
+        imagen_url: datos.imagen_url,
+        envio_gratis: datos.envio_gratis !== false,
+        costo_envio: Number(datos.costo_envio || 0)
+      })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async deleteCelular(id: string) {
+    const { data, error } = await supabase
+      .from('celulares')
+      .delete()
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
   }
 }
