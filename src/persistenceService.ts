@@ -79,7 +79,7 @@ export class PersistenceService {
     const { data, error } = await supabase
       .from('celulares')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('updated_at', { ascending: false });
 
     if (error) throw error;
     return data;
@@ -99,7 +99,8 @@ export class PersistenceService {
           monto_semanal_52: Number(datos.monto_semanal_52),
           imagen: datos.imagen,
           envio_gratis: datos.envio_gratis !== false, // default true
-          costo_envio: Number(datos.costo_envio || 0)
+          costo_envio: Number(datos.costo_envio || 0),
+          updated_at: new Date().toISOString()
         }
       ])
       .select();
@@ -120,7 +121,8 @@ export class PersistenceService {
         monto_semanal_52: Number(datos.monto_semanal_52),
         imagen: datos.imagen,
         envio_gratis: datos.envio_gratis !== false,
-        costo_envio: Number(datos.costo_envio || 0)
+        costo_envio: Number(datos.costo_envio || 0),
+        updated_at: new Date().toISOString()
       })
       .eq('id', id)
       .select();
