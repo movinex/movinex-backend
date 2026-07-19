@@ -97,7 +97,7 @@ export class PersistenceService {
           enganche: Number(datos.enganche),
           monto_semanal_26: Number(datos.monto_semanal_26),
           monto_semanal_52: Number(datos.monto_semanal_52),
-          imagen_url: datos.imagen_url,
+          imagen: datos.imagen,
           envio_gratis: datos.envio_gratis !== false, // default true
           costo_envio: Number(datos.costo_envio || 0)
         }
@@ -118,7 +118,7 @@ export class PersistenceService {
         enganche: Number(datos.enganche),
         monto_semanal_26: Number(datos.monto_semanal_26),
         monto_semanal_52: Number(datos.monto_semanal_52),
-        imagen_url: datos.imagen_url,
+        imagen: datos.imagen,
         envio_gratis: datos.envio_gratis !== false,
         costo_envio: Number(datos.costo_envio || 0)
       })
