@@ -100,7 +100,19 @@ export class PersistenceService {
           imagen: datos.imagen,
           envio_gratis: datos.envio_gratis !== false, // default true
           costo_envio: Number(datos.costo_envio || 0),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
+          specs_pantalla: datos.specs_pantalla || '',
+          specs_procesador: datos.specs_procesador || '',
+          specs_ram_almacenamiento: datos.specs_ram_almacenamiento || '',
+          specs_microsd: datos.specs_microsd || '',
+          specs_camara_trasera: datos.specs_camara_trasera || '',
+          specs_camara_frontal: datos.specs_camara_frontal || '',
+          specs_bateria: datos.specs_bateria || '',
+          specs_sistema: datos.specs_sistema || '',
+          specs_seguridad: datos.specs_seguridad || '',
+          specs_resistencia: datos.specs_resistencia || '',
+          specs_conectividad: datos.specs_conectividad || '',
+          specs_dimensiones_peso: datos.specs_dimensiones_peso || ''
         }
       ])
       .select();
@@ -122,7 +134,19 @@ export class PersistenceService {
         imagen: datos.imagen,
         envio_gratis: datos.envio_gratis !== false,
         costo_envio: Number(datos.costo_envio || 0),
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
+        specs_pantalla: datos.specs_pantalla || '',
+        specs_procesador: datos.specs_procesador || '',
+        specs_ram_almacenamiento: datos.specs_ram_almacenamiento || '',
+        specs_microsd: datos.specs_microsd || '',
+        specs_camara_trasera: datos.specs_camara_trasera || '',
+        specs_camara_frontal: datos.specs_camara_frontal || '',
+        specs_bateria: datos.specs_bateria || '',
+        specs_sistema: datos.specs_sistema || '',
+        specs_seguridad: datos.specs_seguridad || '',
+        specs_resistencia: datos.specs_resistencia || '',
+        specs_conectividad: datos.specs_conectividad || '',
+        specs_dimensiones_peso: datos.specs_dimensiones_peso || ''
       })
       .eq('id', id)
       .select();
