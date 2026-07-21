@@ -10,19 +10,33 @@ import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import { SuperadminService } from './superadminService';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10500;
 const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
+
+// DDoS Protection: Limitador de tasa (Rate Limiting)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 100, // Máximo 100 peticiones por IP en esta ventana
+  standardHeaders: true, // Retorna info de límites en las cabeceras `RateLimit-*`
+  legacyHeaders: false, // Desactiva cabeceras antiguas `X-RateLimit-*`
+  message: {
+    success: false,
+    message: 'Demasiadas solicitudes desde esta IP, por favor intenta de nuevo en 15 minutos.'
+  }
+});
 
 // Middleware de seguridad y parseo
 app.use(helmet());
 app.use(cors({
   origin: '*' 
 }));
+app.use('/api/', apiLimiter); // Aplicar protección a todas las rutas bajo /api/
 app.use(express.json({ limit: '50mb' })); 
 
 // Endpoint de verificación de salud
