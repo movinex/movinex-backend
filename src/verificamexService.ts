@@ -114,11 +114,11 @@ export class VerificamexService {
 
     } catch (error: any) {
       console.error('[Verificamex] Error en validación biométrica:', error.response?.data || error.message);
-      // Fallback seguro en desarrollo local si falla la llamada
+      // Retornar falso si falla la API real para evitar falsas aprobaciones por contingencia.
       return {
-        valido: true,
-        score: 0.85,
-        rawData: { error: true, message: error.message, detail: 'Simulado tras fallo de API real.' }
+        valido: false,
+        score: 0,
+        rawData: { error: true, message: error.message, detail: 'Fallo real de API Verificamex.' }
       };
     }
   }
