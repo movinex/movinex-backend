@@ -19,6 +19,9 @@ const PORT = process.env.PORT || 10500;
 const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
+// Indicar a Express que confíe en los proxies (necesario en Railway / Heroku para rateLimit)
+app.enable('trust proxy');
+
 // DDoS Protection: Limitador de tasa (Rate Limiting)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
