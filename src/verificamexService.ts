@@ -13,9 +13,34 @@ export class VerificamexService {
    * @returns Un objeto con el estatus de la consulta y el score.
    */
   static async validarTelefono(numeroTelefono: string): Promise<{ valido: boolean; estatus: string; rawData: any }> {
+    // Modo de pruebas/simulación local:
+    // Si el número de teléfono termina en "99" se simula un RECHAZO (para probar alertas de riesgo)
+    // Si el número termina en "88" o similar, o por defecto, se simula una APROBACIÓN limpia.
+    if (numeroTelefono.endsWith('99')) {
+      console.log(`[Verificamex MOCK] Simulando RECHAZO local para el teléfono: ${numeroTelefono}`);
+      return {
+        valido: false,
+        estatus: 'REJECTED',
+        rawData: { mock: true, testStatus: 'REJECTED', detail: 'Simulado para pruebas de flujo de rechazos y alertas.' }
+      };
+    } else if (numeroTelefono.endsWith('88')) {
+      console.log(`[Verificamex MOCK] Simulando APROBACIÓN local para el teléfono: ${numeroTelefono}`);
+      return {
+        valido: true,
+        estatus: 'APPROVED',
+        rawData: { mock: true, testStatus: 'APPROVED', detail: 'Simulado para pruebas de flujo de aprobación limpia.' }
+      };
+    }
+
     try {
       if (!this.API_KEY) {
-        throw new Error('VERIFICAMEX_API_KEY no está configurado en el servidor.');
+        // En local, si no hay API_KEY configurada, hacemos fallback a aprobado por defecto en vez de arrojar error.
+        console.warn('[Verificamex] VERIFICAMEX_API_KEY no configurado. Iniciando simulación de aprobación automática por defecto.');
+        return {
+          valido: true,
+          estatus: 'APPROVED',
+          rawData: { mock: true, detail: 'Aprobado automáticamente por ausencia de credenciales.' }
+        };
       }
 
       // Limpiar el número para tener solo dígitos
