@@ -10,7 +10,6 @@ if (!supabaseUrl || !supabaseServiceKey) {
   console.error('ERROR: Faltan las variables de entorno de Supabase (URL o SERVICE_ROLE_KEY).');
 }
 
-// Inicializar Supabase con privilegios administrativos de Service Role para operaciones seguras desde backend
 export const supabase = createClient(supabaseUrl || '', supabaseServiceKey || '', {
   auth: {
     persistSession: false,

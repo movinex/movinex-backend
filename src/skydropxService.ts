@@ -1,13 +1,9 @@
 import axios from 'axios';
 
-/**
- * Servicio para interactuar con la API de Skydropx v1.
- */
 export class SkydropxService {
   private static API_KEY = process.env.SKYDROPX_API_KEY;
   private static BASE_URL = 'https://api.skydropx.com/v1';
 
-  // Dirección de origen por defecto (NVX Technologies - Remitente)
   private static REMITENTE_DEFAULT = {
     name: 'NVX Technologies',
     street1: 'Av. Paseo de la Reforma 222',
@@ -20,16 +16,6 @@ export class SkydropxService {
     email: 'contacto@movinex.mx'
   };
 
-  /**
-   * Crea un envío (Shipment) automatizado en Skydropx utilizando los datos de destino del cliente.
-   * @param cliente Nombre del destinatario
-   * @param telefono Teléfono del destinatario
-   * @param email Email del destinatario
-   * @param cp Código Postal de destino
-   * @param direccion Calle y número de destino
-   * @param modelo Celular comprado (para descripción)
-   * @returns Un objeto con el ID del envío y las tarifas/guías disponibles
-   */
   static async crearEnvio(
     cliente: string,
     telefono: string,
@@ -50,7 +36,7 @@ export class SkydropxService {
         address_to: {
           name: cliente,
           street1: direccion,
-          city: 'Destino', // El sistema calcula por CP
+          city: 'Destino',
           state: 'Destino',
           zip: cp,
           country: 'MX',
@@ -60,7 +46,7 @@ export class SkydropxService {
         },
         parcels: [
           {
-            weight: 1, // 1 Kg peso estándar para un celular embalado
+            weight: 1,
             distance_unit: 'CM',
             mass_unit: 'KG',
             height: 10,
@@ -87,7 +73,6 @@ export class SkydropxService {
     } catch (error: any) {
       console.error('[Skydropx] Error al cotizar envío:', error.response?.data || error.message);
       
-      // Fallback seguro para simulación en la demo en caso de no contar con saldo en Skydropx
       return {
         simulado: true,
         data: {

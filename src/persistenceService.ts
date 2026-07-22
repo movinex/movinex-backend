@@ -1,9 +1,5 @@
 import { supabase } from './supabase';
 
-/**
- * Servicio para encapsular la capa de datos.
- * Permite alternar la lógica de negocio de persistencia sin alterar el resto del servidor ni la API del frontend.
- */
 export class PersistenceService {
   
   static async saveSolicitud(datos: any) {
@@ -46,9 +42,8 @@ export class PersistenceService {
   }
 
   static async updateEstatusByContacto(contacto: string, nuevoEstatus: string, extraData?: any) {
-    // Intentar buscar tanto por email como por celular (limpiando formato de país)
     const telefonoLimpio = contacto.replace(/\D/g, '');
-    const telefonoSinPrefijo = telefonoLimpio.slice(-10); // Últimos 10 dígitos
+    const telefonoSinPrefijo = telefonoLimpio.slice(-10);
 
     const updateFields: any = { estatus: nuevoEstatus };
     if (extraData?.tracking_number) {
@@ -98,7 +93,7 @@ export class PersistenceService {
           monto_semanal_26: Number(datos.monto_semanal_26),
           monto_semanal_52: Number(datos.monto_semanal_52),
           imagen: datos.imagen,
-          envio_gratis: datos.envio_gratis !== false, // default true
+          envio_gratis: datos.envio_gratis !== false,
           costo_envio: Number(datos.costo_envio || 0),
           updated_at: new Date().toISOString(),
           specs_pantalla: datos.specs_pantalla || '',

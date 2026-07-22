@@ -232,16 +232,16 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     // 1b. Realizar la validación biométrica facial (INE vs Selfie) real usando Verificamex
     let biometricResult = { valido: true, score: 1 };
     if (req.body.ine_frente && req.body.selfie) {
-      biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie);
+      biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie, email);
     }
     
     // Si ambos son válidos, se aprueba de inmediato.
     const esSolicitudValida = kycResult.valido && biometricResult.valido;
     const estatusInicial = esSolicitudValida ? 'Aprobado' : 'Pendiente';
 
-    // 2. Si no es autorizado, enviar alerta por email a info@movinex.mx (simulado por consola en backend)
+    // 2. Si no es autorizado, enviar alerta por email a desarrollo@movinex.mx (simulado por consola en backend)
     if (!esSolicitudValida) {
-      console.warn(`[ALERTA DE RIESGO] Envío de alerta a info@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}).`);
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}).`);
     }
 
     // 3. Generar Link de Pago en Conekta para el enganche

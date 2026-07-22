@@ -1,22 +1,11 @@
 import bcrypt from 'bcryptjs';
 import { supabase } from './supabase';
 
-/**
- * Servicio encargado de gestionar los procesos de autenticación y validación
- * del portal oculto de Super Administradores.
- */
 export class SuperadminService {
-  /**
-   * Autentica un usuario administrativo en base a las credenciales y el hash bcrypt en Supabase.
-   * @param usuario Correo o nombre del administrador
-   * @param clave Contraseña en texto plano
-   * @returns Un objeto con el estatus del login y datos del perfil si es exitoso
-   */
   static async login(usuario: string, clave: string): Promise<{ success: boolean; admin?: any; message: string }> {
     try {
       console.log(`[SuperadminService] Intentando login para: ${usuario}`);
 
-      // Buscar el usuario en la tabla 'superadmins'
       const { data, error } = await supabase
         .from('superadmins')
         .select('*')
@@ -28,7 +17,6 @@ export class SuperadminService {
         return { success: false, message: 'Usuario o contraseña incorrectos.' };
       }
 
-      // Comparar el hash de la contraseña usando bcryptjs
       const esValido = await bcrypt.compare(clave, data.password_hash);
 
       if (!esValido) {
