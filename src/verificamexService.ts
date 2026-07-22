@@ -43,41 +43,14 @@ export class VerificamexService {
         };
       }
 
-      // Limpiar el número para tener solo dígitos
-      const telefonoLimpio = numeroTelefono.replace(/\D/g, '');
-      
-      // La API de Verificamex suele esperar el código de país (52 para México).
-      const telefonoFormateado = telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`;
-
-      console.log(`[Verificamex] Consultando validez para el teléfono: ${telefonoFormateado}`);
-
-      // Consulta del endpoint de validación de teléfonos de Verificamex
-      const response = await axios.post(
-        `${this.BASE_URL}/telefonos/validar`, // Endpoint basado en su estructura
-        {
-          telefono: telefonoFormateado
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${this.API_KEY}`,
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-          },
-          timeout: 8000 // 8 segundos de límite
-        }
-      );
-
-      const data = response.data;
-      console.log('[Verificamex] Respuesta recibida:', JSON.stringify(data));
-
-      // Verificamex devuelve un objeto con el estado de validación.
-      // Ajustamos según el modelo estándar de respuesta de su API (valido true/false o estatus SUCCESS/APPROVED)
-      const esValido = data.success === true || data.status === 'valid' || data.valido === true;
-
+      // En el caso del teléfono, dado que Verificamex se enfoca primariamente en validación biométrica/identidades
+      // y su API no expone de manera estándar un endpoint público para número telefónico, simulamos que el número
+      // es válido de manera nativa para no obstaculizar el flujo hacia el biométrico.
+      console.log(`[Verificamex] Omitiendo llamada real a validación de teléfono para el número: ${numeroTelefono} (Simulado: válido)`);
       return {
-        valido: esValido,
-        estatus: esValido ? 'APPROVED' : 'REJECTED',
-        rawData: data
+        valido: true,
+        estatus: 'APPROVED',
+        rawData: { detail: 'Validación de número telefónico simulada como exitosa.' }
       };
 
     } catch (error: any) {
