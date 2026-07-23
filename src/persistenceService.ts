@@ -21,7 +21,8 @@ export class PersistenceService {
           checkout_url: datos.checkout_url || null,
           codigo_postal: datos.codigo_postal || null,
           direccion_envio: datos.direccion_envio || null,
-          tracking_number: datos.tracking_number || null
+          tracking_number: datos.tracking_number || null,
+          curp: datos.curp || null
         }
       ])
       .select();
