@@ -237,20 +237,14 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     if (req.body.ine_frente && req.body.selfie) {
       biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie, email);
     }
-
-    // 1c. Realizar la validación de CURP ante RENAPO usando Verificamex
-    let curpResult: { valido: boolean; datos?: any; rawData?: any } = { valido: true, datos: null };
-    if (req.body.curp) {
-      curpResult = await VerificamexService.validarCURP(req.body.curp, email);
-    }
     
-    // Si todos son válidos, se aprueba de inmediato.
-    const esSolicitudValida = kycResult.valido && biometricResult.valido && curpResult.valido;
+    // Si ambos son válidos, se aprueba de inmediato.
+    const esSolicitudValida = kycResult.valido && biometricResult.valido;
     const estatusInicial = esSolicitudValida ? 'Aprobado' : 'Pendiente';
 
     // 2. Si no es autorizado, enviar alerta por email a desarrollo@movinex.mx (simulado por consola en backend)
     if (!esSolicitudValida) {
-      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}, CURP: ${curpResult.valido ? 'OK' : 'RECHAZADO'}).`);
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}).`);
     }
 
     // 3. Generar Link de Pago en Conekta para el enganche
