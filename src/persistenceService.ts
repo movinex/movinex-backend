@@ -7,7 +7,7 @@ export class PersistenceService {
       .from('solicitudes')
       .insert([
         {
-          cliente: datos.cliente,
+          cliente: datos.cliente || 'Pendiente de verificación',
           celular: datos.celular,
           email: datos.email,
           modelo: datos.modelo,

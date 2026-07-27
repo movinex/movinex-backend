@@ -225,7 +225,8 @@ app.get('/api/celulares', async (req: Request, res: Response) => {
  */
 app.post('/api/solicitudes', async (req: Request, res: Response) => {
   try {
-    const { cliente, celular, email } = req.body;
+    const { celular, email } = req.body;
+    const cliente = req.body.cliente || 'Pendiente de verificación';
 
     console.log(`[Backend] Procesando nueva solicitud para: ${cliente} (${celular})`);
 
