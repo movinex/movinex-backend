@@ -60,6 +60,66 @@ export class PersistenceService {
     return data;
   }
 
+  static async marcarPagoConfirmadoByContacto(contacto: string) {
+    const telefonoLimpio = contacto.replace(/\D/g, '');
+    const telefonoSinPrefijo = telefonoLimpio.slice(-10);
+
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ pago_confirmado: true })
+      .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
+      .select();
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async getEstatusPagoByContacto(contacto: string) {
+    const telefonoLimpio = contacto.replace(/\D/g, '');
+    const telefonoSinPrefijo = telefonoLimpio.slice(-10);
+
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('id, pago_confirmado')
+      .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async saveDomicilio(id: string, datos: any) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({
+        calle: datos.calle,
+        numero_exterior: datos.numero_exterior,
+        numero_interior: datos.numero_interior || null,
+        colonia: datos.colonia,
+        alcaldia_municipio: datos.alcaldia_municipio,
+        estado: datos.estado,
+        codigo_postal: datos.codigo_postal
+      })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async guardarTrackingNumber(id: string, trackingNumber: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ tracking_number: trackingNumber })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
   static async getSolicitudes() {
     const { data, error } = await supabase
       .from('solicitudes')

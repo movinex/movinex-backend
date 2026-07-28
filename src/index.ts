@@ -174,6 +174,46 @@ app.get('/api/solicitudes', async (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/solicitudes/estatus:
+ *   get:
+ *     summary: Consultar únicamente si el pago del enganche ya fue confirmado (uso público, sin datos sensibles)
+ *     parameters:
+ *       - in: query
+ *         name: celular
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: email
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Estatus de pago de la solicitud más reciente que coincide con el contacto.
+ */
+app.get('/api/solicitudes/estatus', async (req: Request, res: Response) => {
+  try {
+    const contacto = (req.query.celular || req.query.email) as string | undefined;
+    if (!contacto) {
+      return res.status(400).json({ error: 'Se requiere celular o email.' });
+    }
+
+    const solicitud = await PersistenceService.getEstatusPagoByContacto(contacto);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    return res.status(200).json({
+      id: solicitud.id,
+      pagoConfirmado: solicitud.pago_confirmado === true
+    });
+  } catch (error: any) {
+    console.error('Error al consultar estatus de pago:', error);
+    return res.status(500).json({ error: error.message || 'Error al consultar estatus de pago.' });
+  }
+});
+
+/**
+ * @swagger
  * /api/celulares:
  *   get:
  *     summary: Obtener catálogo de celulares desde Supabase
@@ -282,6 +322,100 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error procesando solicitud:', error);
     return res.status(500).json({ error: error.message || 'Ocurrió un error inesperado al procesar la solicitud.' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/solicitudes/{id}/domicilio:
+ *   post:
+ *     summary: Guardar el domicilio de envío tras el pago y generar la guía real en Skydropx
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - calle
+ *               - numero_exterior
+ *               - colonia
+ *               - alcaldia_municipio
+ *               - estado
+ *               - codigo_postal
+ *             properties:
+ *               calle:
+ *                 type: string
+ *               numero_exterior:
+ *                 type: string
+ *               numero_interior:
+ *                 type: string
+ *               colonia:
+ *                 type: string
+ *               alcaldia_municipio:
+ *                 type: string
+ *               estado:
+ *                 type: string
+ *               codigo_postal:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Domicilio guardado y guía de envío generada.
+ */
+app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { calle, numero_exterior, numero_interior, colonia, alcaldia_municipio, estado, codigo_postal } = req.body;
+
+    if (!calle || !numero_exterior || !colonia || !alcaldia_municipio || !estado || !codigo_postal) {
+      return res.status(400).json({ error: 'Faltan campos obligatorios del domicilio.' });
+    }
+
+    const solicitud = await PersistenceService.saveDomicilio(id, {
+      calle, numero_exterior, numero_interior, colonia, alcaldia_municipio, estado, codigo_postal
+    });
+
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    const skydropxResponse = await SkydropxService.crearEnvio(
+      solicitud.cliente,
+      solicitud.celular,
+      solicitud.email,
+      {
+        calle,
+        numeroExterior: numero_exterior,
+        numeroInterior: numero_interior,
+        colonia,
+        alcaldiaMunicipio: alcaldia_municipio,
+        estado,
+        codigoPostal: codigo_postal
+      },
+      solicitud.modelo
+    );
+
+    const trackingNumber = skydropxResponse?.data?.attributes?.tracking_number ||
+                            skydropxResponse?.data?.tracking_number || null;
+
+    const solicitudFinal = trackingNumber
+      ? await PersistenceService.guardarTrackingNumber(id, trackingNumber)
+      : solicitud;
+
+    return res.status(200).json({
+      success: true,
+      solicitud: solicitudFinal,
+      trackingNumber
+    });
+  } catch (error: any) {
+    console.error('Error al guardar domicilio y generar envío:', error);
+    return res.status(500).json({ error: error.message || 'Ocurrió un error al procesar el domicilio.' });
   }
 });
 
@@ -409,47 +543,16 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
       console.log(`[Conekta Webhook] Orden pagada con éxito: ${order.id}. Monto: $${(order.amount / 100).toFixed(2)} MXN`);
       console.log(`[Conekta Webhook] Cliente: ${customerInfo?.name}. Contacto: ${email} / ${phone}`);
 
-      // Intentar actualizar el estatus de la solicitud a 'Aprobado' o 'Pagado' en Supabase
+      // Marcar el pago como confirmado. El envío en Skydropx se genera después,
+      // cuando el cliente llena el formulario de Domicilio (POST /api/solicitudes/:id/domicilio),
+      // ya que en este punto todavía no tenemos su dirección real.
       if (email || phone) {
         const identificador = email || phone;
-        
-        // 1. Obtener los datos actuales de la solicitud para el envío
-        const solicitudes = await PersistenceService.getSolicitudes();
-        const solicitud = solicitudes.find((s: any) => s.email === email || s.celular.includes(phone.slice(-10)));
 
-        let trackingNumber = null;
+        const solicitudesActualizadas = await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
 
-        if (solicitud) {
-          console.log(`[Conekta Webhook] Solicitud encontrada para envío. Cliente: ${solicitud.cliente}. Destino: CP ${solicitud.codigo_postal || 'Sin CP'}`);
-          
-          // 2. Generar el envío automático en Skydropx
-          const cpDestino = solicitud.codigo_postal || '06600';
-          const direccionDestino = solicitud.direccion_envio || 'Domicilio conocido';
-          
-          const skydropxResponse = await SkydropxService.crearEnvio(
-            solicitud.cliente,
-            solicitud.celular,
-            solicitud.email,
-            cpDestino,
-            direccionDestino,
-            solicitud.modelo
-          );
-
-          trackingNumber = skydropxResponse?.data?.attributes?.tracking_number || 
-                           skydropxResponse?.data?.tracking_number || null;
-
-          console.log(`[Conekta Webhook] Envío cotizado y programado en Skydropx. Guía/Tracking: ${trackingNumber}`);
-        }
-
-        // 3. Actualizar la solicitud a aprobada y guardar el tracking
-        const solicitudesActualizadas = await PersistenceService.updateEstatusByContacto(
-          identificador, 
-          'Aprobado', 
-          { tracking_number: trackingNumber }
-        );
-        
         if (solicitudesActualizadas && solicitudesActualizadas.length > 0) {
-          console.log(`[Conekta Webhook] Se actualizaron ${solicitudesActualizadas.length} solicitudes del cliente a 'Aprobado'.`);
+          console.log(`[Conekta Webhook] Pago confirmado para ${solicitudesActualizadas.length} solicitud(es) del cliente.`);
         } else {
           console.warn(`[Conekta Webhook] No se encontró ninguna solicitud de crédito que coincida con el contacto: ${identificador}`);
         }

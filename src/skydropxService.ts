@@ -20,8 +20,15 @@ export class SkydropxService {
     cliente: string,
     telefono: string,
     email: string,
-    cp: string,
-    direccion: string,
+    domicilio: {
+      calle: string;
+      numeroExterior: string;
+      numeroInterior?: string;
+      colonia: string;
+      alcaldiaMunicipio: string;
+      estado: string;
+      codigoPostal: string;
+    },
     modelo: string
   ): Promise<any> {
     try {
@@ -29,16 +36,19 @@ export class SkydropxService {
         throw new Error('SKYDROPX_API_KEY no está configurada.');
       }
 
-      console.log(`[Skydropx] Generando cotización de envío para ${cliente} a CP ${cp}...`);
+      console.log(`[Skydropx] Generando cotización de envío para ${cliente} a CP ${domicilio.codigoPostal}...`);
+
+      const street1 = `${domicilio.calle} ${domicilio.numeroExterior}${domicilio.numeroInterior ? ` Int. ${domicilio.numeroInterior}` : ''}`;
 
       const payload = {
         address_from: this.REMITENTE_DEFAULT,
         address_to: {
           name: cliente,
-          street1: direccion,
-          city: 'Destino',
-          state: 'Destino',
-          zip: cp,
+          street1,
+          street2: domicilio.colonia,
+          city: domicilio.alcaldiaMunicipio,
+          state: domicilio.estado,
+          zip: domicilio.codigoPostal,
           country: 'MX',
           phone: telefono.replace(/\D/g, ''),
           email: email,
