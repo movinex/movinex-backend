@@ -481,6 +481,22 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
   }
 });
 
+// POST: Subir imagen de un celular al Storage de Supabase (el frontend ya no habla con Supabase directo)
+app.post('/api/celulares/imagen', async (req: Request, res: Response) => {
+  try {
+    const { imagen } = req.body;
+    if (!imagen) {
+      return res.status(400).json({ error: 'Se requiere la imagen en base64.' });
+    }
+
+    const url = await PersistenceService.subirImagenCelular(imagen);
+    return res.status(200).json({ success: true, url });
+  } catch (error: any) {
+    console.error('Error al subir imagen de celular:', error);
+    return res.status(500).json({ error: error.message || 'Error al subir la imagen.' });
+  }
+});
+
 // POST: Crear nuevo celular en el catálogo
 app.post('/api/celulares', async (req: Request, res: Response) => {
   try {

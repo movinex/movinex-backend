@@ -1,7 +1,28 @@
 import { supabase } from './supabase';
 
 export class PersistenceService {
-  
+
+  static async subirImagenCelular(base64DataUrl: string): Promise<string> {
+    const match = base64DataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+    if (!match) {
+      throw new Error('Formato de imagen inválido. Se espera un data URL base64.');
+    }
+
+    const mimeType = match[1];
+    const buffer = Buffer.from(match[2], 'base64');
+    const extension = mimeType.split('/')[1] || 'jpg';
+    const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 11)}.${extension}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('celulares')
+      .upload(fileName, buffer, { contentType: mimeType, cacheControl: '3600', upsert: false });
+
+    if (uploadError) throw uploadError;
+
+    const { data } = supabase.storage.from('celulares').getPublicUrl(fileName);
+    return data.publicUrl;
+  }
+
   static async saveSolicitud(datos: any) {
     const { data, error } = await supabase
       .from('solicitudes')
