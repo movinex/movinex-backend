@@ -29,6 +29,7 @@ export class PersistenceService {
       .insert([
         {
           cliente: datos.cliente || 'Pendiente de verificación',
+          curp: datos.curp || null,
           celular: datos.celular,
           email: datos.email,
           modelo: datos.modelo,

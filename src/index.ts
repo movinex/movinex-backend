@@ -266,19 +266,27 @@ app.get('/api/celulares', async (req: Request, res: Response) => {
 app.post('/api/solicitudes', async (req: Request, res: Response) => {
   try {
     const { celular, email } = req.body;
-    const cliente = req.body.cliente || 'Pendiente de verificación';
+    let cliente = req.body.cliente || 'Pendiente de verificación';
+    let curp: string | null = null;
 
     console.log(`[Backend] Procesando nueva solicitud para: ${cliente} (${celular})`);
 
     // 1. Validar el teléfono usando Verificamex
     const kycResult = await VerificamexService.validarTelefono(celular);
-    
+
     // 1b. Realizar la validación biométrica facial (INE vs Selfie) real usando Verificamex
     let biometricResult = { valido: true, score: 1 };
     if (req.body.ine_frente && req.body.selfie) {
       biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie, email);
     }
-    
+
+    // 1c. Leer nombre y CURP reales del frente del INE por OCR (Verificamex)
+    if (req.body.ine_frente) {
+      const datosIne = await VerificamexService.leerDatosINE(req.body.ine_frente, email);
+      if (datosIne.nombre) cliente = datosIne.nombre;
+      curp = datosIne.curp;
+    }
+
     // Si ambos son válidos, se aprueba de inmediato.
     const esSolicitudValida = kycResult.valido && biometricResult.valido;
     const estatusInicial = esSolicitudValida ? 'Aprobado' : 'Pendiente';
@@ -307,6 +315,8 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     // 4. Guardar en base de datos con el estatus dictaminado y la URL de pago
     const solicitud = await PersistenceService.saveSolicitud({
       ...req.body,
+      cliente,
+      curp,
       estatus: estatusInicial,
       checkout_url: checkoutUrl
     });

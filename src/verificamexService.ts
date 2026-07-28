@@ -48,6 +48,49 @@ export class VerificamexService {
     }
   }
 
+  static async leerDatosINE(ineFrontBase64: string, emailCliente?: string): Promise<{ nombre: string | null; curp: string | null; rawData: any }> {
+    try {
+      const esPruebaReal = emailCliente && emailCliente.toLowerCase().includes('real');
+
+      if (!this.API_KEY || !esPruebaReal) {
+        console.log('[Verificamex MOCK] Omitiendo lectura OCR del INE (Simulado).');
+        return { nombre: null, curp: null, rawData: { mock: true } };
+      }
+
+      console.log('[Verificamex] Solicitando lectura OCR del frente del INE...');
+
+      const response = await axios.post(
+        `${this.BASE_URL}/ocr/obverse`,
+        { ine_front: ineFrontBase64 },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.API_KEY}`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          timeout: 30000
+        }
+      );
+
+      const parseOcr: Array<{ type: string; value: string }> = response.data?.data?.parse_ocr || [];
+      const getCampo = (tipo: string) => parseOcr.find((c) => c.type === tipo)?.value?.trim() || null;
+
+      // No todas las credenciales devuelven "FullName"; si falta, se arma con Name + Surname.
+      const nombrePila = getCampo('Name');
+      const apellidos = getCampo('Surname');
+      const nombre = getCampo('FullName') || [nombrePila, apellidos].filter(Boolean).join(' ') || null;
+
+      return {
+        nombre,
+        curp: getCampo('PersonalNumber'),
+        rawData: response.data
+      };
+    } catch (error: any) {
+      console.error('[Verificamex] Error al leer el INE por OCR:', error.response?.data || error.message);
+      return { nombre: null, curp: null, rawData: { error: true, message: error.message } };
+    }
+  }
+
   static async validarIdentidadBiometrica(ineFrontBase64: string, selfieBase64: string, emailCliente?: string): Promise<{ valido: boolean; score: number; rawData: any }> {
     try {
       const esPruebaReal = emailCliente && emailCliente.toLowerCase().includes('real');
