@@ -83,6 +83,19 @@ export class PersistenceService {
     return data[0];
   }
 
+  // TEMPORAL: mientras no esté integrado el webhook real de Conekta, el pago se
+  // confirma directo por id en vez de esperar la notificación de Conekta.
+  static async marcarPagoConfirmadoPorId(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ pago_confirmado: true })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
   static async updateEstatus(id: string, nuevoEstatus: 'Aprobado' | 'Rechazado') {
     const { data, error } = await supabase
       .from('solicitudes')

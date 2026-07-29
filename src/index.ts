@@ -346,6 +346,26 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
   }
 });
 
+// TEMPORAL: mientras no esté integrado el webhook real de Conekta, el frontend
+// confirma el pago del enganche "a mano" en vez de esperar la notificación real.
+// Borrar este endpoint (y volver al polling de /api/solicitudes/estatus vía webhook)
+// cuando Conekta esté integrado de verdad.
+app.post('/api/solicitudes/:id/confirmar-pago-simulado', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const solicitud = await PersistenceService.marcarPagoConfirmadoPorId(id);
+
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    return res.status(200).json({ success: true, solicitud });
+  } catch (error: any) {
+    console.error('Error al confirmar pago simulado:', error);
+    return res.status(500).json({ error: error.message || 'Ocurrió un error al confirmar el pago.' });
+  }
+});
+
 /**
  * @swagger
  * /api/solicitudes/{id}/domicilio:
