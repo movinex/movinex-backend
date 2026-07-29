@@ -8,6 +8,7 @@ import { ConektaService } from './conektaService';
 import { SkydropxService } from './skydropxService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import { SuperadminService } from './superadminService';
+import { requireAdminAuth } from './adminAuth';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
 import rateLimit from 'express-rate-limit';
@@ -162,7 +163,7 @@ app.use('/api-docs', swaggerUi.serve as any, swaggerUi.setup(swaggerSpec) as any
  *       200:
  *         description: Lista de solicitudes crediticias registradas.
  */
-app.get('/api/solicitudes', async (req: Request, res: Response) => {
+app.get('/api/solicitudes', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const solicitudes = await PersistenceService.getSolicitudes();
     return res.status(200).json(solicitudes);
@@ -312,11 +313,21 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
       checkoutUrl = 'https://pay.conekta.com/checkout/simulado-tests';
     }
 
+    // 3b. Subir INE/selfie al bucket privado (ya no se guarda el base64 en la fila)
+    const [ineFrentePath, ineReversoPath, selfiePath] = await Promise.all([
+      req.body.ine_frente ? PersistenceService.subirDocumentoKYC(req.body.ine_frente, 'ine_frente') : Promise.resolve(req.body.ine_frente),
+      req.body.ine_reverso ? PersistenceService.subirDocumentoKYC(req.body.ine_reverso, 'ine_reverso') : Promise.resolve(req.body.ine_reverso),
+      req.body.selfie ? PersistenceService.subirDocumentoKYC(req.body.selfie, 'selfie') : Promise.resolve(req.body.selfie)
+    ]);
+
     // 4. Guardar en base de datos con el estatus dictaminado y la URL de pago
     const solicitud = await PersistenceService.saveSolicitud({
       ...req.body,
       cliente,
       curp,
+      ine_frente: ineFrentePath,
+      ine_reverso: ineReversoPath,
+      selfie: selfiePath,
       estatus: estatusInicial,
       checkout_url: checkoutUrl
     });
@@ -454,7 +465,7 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
  *       200:
  *         description: Estatus actualizado.
  */
-app.patch('/api/solicitudes/:id', async (req: Request, res: Response) => {
+app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { estatus } = req.body;
@@ -492,7 +503,7 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
 });
 
 // POST: Subir imagen de un celular al Storage de Supabase (el frontend ya no habla con Supabase directo)
-app.post('/api/celulares/imagen', async (req: Request, res: Response) => {
+app.post('/api/celulares/imagen', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { imagen } = req.body;
     if (!imagen) {
@@ -508,7 +519,7 @@ app.post('/api/celulares/imagen', async (req: Request, res: Response) => {
 });
 
 // POST: Crear nuevo celular en el catálogo
-app.post('/api/celulares', async (req: Request, res: Response) => {
+app.post('/api/celulares', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const celular = await PersistenceService.createCelular(req.body);
     return res.status(201).json({ success: true, celular });
@@ -519,7 +530,7 @@ app.post('/api/celulares', async (req: Request, res: Response) => {
 });
 
 // PUT: Actualizar celular del catálogo
-app.put('/api/celulares/:id', async (req: Request, res: Response) => {
+app.put('/api/celulares/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const celular = await PersistenceService.updateCelular(id, req.body);
@@ -531,7 +542,7 @@ app.put('/api/celulares/:id', async (req: Request, res: Response) => {
 });
 
 // DELETE: Eliminar celular del catálogo
-app.delete('/api/celulares/:id', async (req: Request, res: Response) => {
+app.delete('/api/celulares/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     await PersistenceService.deleteCelular(id);

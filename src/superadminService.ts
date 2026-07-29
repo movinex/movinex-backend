@@ -1,8 +1,9 @@
 import bcrypt from 'bcryptjs';
 import { supabase } from './supabase';
+import { generarTokenAdmin } from './adminAuth';
 
 export class SuperadminService {
-  static async login(usuario: string, clave: string): Promise<{ success: boolean; admin?: any; message: string }> {
+  static async login(usuario: string, clave: string): Promise<{ success: boolean; admin?: any; token?: string; message: string }> {
     try {
       console.log(`[SuperadminService] Intentando login para: ${usuario}`);
 
@@ -25,6 +26,7 @@ export class SuperadminService {
       }
 
       console.log(`[SuperadminService] Acceso concedido a: ${data.nombre}`);
+      const token = generarTokenAdmin({ adminId: data.id, usuario: data.usuario });
       return {
         success: true,
         admin: {
@@ -32,6 +34,7 @@ export class SuperadminService {
           usuario: data.usuario,
           nombre: data.nombre
         },
+        token,
         message: 'Acceso autorizado exitosamente.'
       };
 

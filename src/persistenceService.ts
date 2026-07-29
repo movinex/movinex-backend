@@ -23,6 +23,37 @@ export class PersistenceService {
     return data.publicUrl;
   }
 
+  // Documentos KYC (INE/selfie): bucket privado, se guarda el path, no la imagen ni una URL pública.
+  static async subirDocumentoKYC(base64DataUrl: string, prefijo: string): Promise<string> {
+    const match = base64DataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+    if (!match) {
+      throw new Error('Formato de imagen inválido. Se espera un data URL base64.');
+    }
+
+    const mimeType = match[1];
+    const buffer = Buffer.from(match[2], 'base64');
+    const extension = mimeType.split('/')[1] || 'jpg';
+    const path = `${prefijo}_${Date.now()}_${Math.random().toString(36).slice(2, 11)}.${extension}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('documentos-kyc')
+      .upload(path, buffer, { contentType: mimeType, cacheControl: '3600', upsert: false });
+
+    if (uploadError) throw uploadError;
+
+    return path;
+  }
+
+  // Genera una URL firmada de corta duración para un documento KYC ya subido al bucket privado.
+  static async firmarDocumentoKYC(path: string, expirySeconds = 600): Promise<string | null> {
+    const { data, error } = await supabase.storage
+      .from('documentos-kyc')
+      .createSignedUrl(path, expirySeconds);
+
+    if (error || !data) return null;
+    return data.signedUrl;
+  }
+
   static async saveSolicitud(datos: any) {
     const { data, error } = await supabase
       .from('solicitudes')
@@ -149,7 +180,23 @@ export class PersistenceService {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return data;
+
+    // Las solicitudes nuevas guardan el path del bucket privado, no la imagen ni una URL.
+    // Se firma al momento de leer, con vencimiento corto. Las filas viejas (base64 directo) quedan igual.
+    const esPath = (valor: any) => typeof valor === 'string' && valor.length > 0 && !valor.startsWith('data:');
+
+    const solicitudesConUrls = await Promise.all(
+      (data || []).map(async (s: any) => {
+        const [ineFrenteUrl, ineReversoUrl, selfieUrl] = await Promise.all([
+          esPath(s.ine_frente) ? this.firmarDocumentoKYC(s.ine_frente) : s.ine_frente,
+          esPath(s.ine_reverso) ? this.firmarDocumentoKYC(s.ine_reverso) : s.ine_reverso,
+          esPath(s.selfie) ? this.firmarDocumentoKYC(s.selfie) : s.selfie
+        ]);
+        return { ...s, ine_frente: ineFrenteUrl, ine_reverso: ineReversoUrl, selfie: selfieUrl };
+      })
+    );
+
+    return solicitudesConUrls;
   }
 
   static async getCelulares() {
