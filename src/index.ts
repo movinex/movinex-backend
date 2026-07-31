@@ -383,8 +383,8 @@ app.post('/api/otp/verificar', async (req: Request, res: Response) => {
   }
 });
 
-// POST: Crea la Orden del enganche para pagarla con el Checkout Component embebido de
-// Conekta. La confirmación real del pago llega después por el webhook order.paid.
+// POST: Crea la Orden del enganche como Hosted Payment de Conekta y devuelve la URL a
+// donde redirigir al cliente. La confirmación real del pago llega por el webhook order.paid.
 app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -394,16 +394,22 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const { orderId, checkoutId } = await ConektaService.crearOrdenEnganche(
+    const origin = req.get('origin') || 'https://www.movinex.mx';
+    const successUrl = `${origin}/?pago_exitoso=1&solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+    const failureUrl = `${origin}/?pago_fallido=1`;
+
+    const { orderId, checkoutUrl } = await ConektaService.crearOrdenEnganche(
       solicitud.cliente,
       solicitud.email,
       solicitud.celular,
       solicitud.modelo,
-      Number(solicitud.enganche)
+      Number(solicitud.enganche),
+      successUrl,
+      failureUrl
     );
 
-    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, esperando pago vía Checkout Component.`);
-    return res.status(200).json({ success: true, checkoutId });
+    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, redirigiendo a Hosted Payment.`);
+    return res.status(200).json({ success: true, checkoutUrl });
   } catch (error: any) {
     console.error('Error al crear la orden del enganche:', error.response?.data || error.message);
     return res.status(500).json({ error: error.message || 'Ocurrió un error al iniciar el pago del enganche.' });

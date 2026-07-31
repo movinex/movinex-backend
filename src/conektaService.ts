@@ -83,21 +83,23 @@ export class ConektaService {
   }
 
   /**
-   * Crea la Orden del enganche para pagarla con el Checkout Component embebido
-   * (`conekta-checkout.min.js`, iframe hosteado por Conekta — no volvemos a ver la
-   * tarjeta del cliente). Reemplaza al viejo flujo de Conekta.js + Token.create(),
-   * que esta cuenta no acepta ("At the moment, the merchant does not accept payments
-   * with your payment method"). El frontend inicializa el componente con el
-   * `checkoutId` que devuelve esto; la confirmación real del pago la hace el webhook
-   * `order.paid` (ya implementado), no la respuesta del frontend.
+   * Crea la Orden del enganche con checkout tipo HostedPayment: el cliente sale de
+   * nuestro sitio a una página de pago hosteada por Conekta y vuelve a `successUrl`/
+   * `failureUrl` al terminar. Reemplaza al Checkout Component embebido (`Integration`),
+   * que en esta cuenta falla con "Ha ocurrido un error inesperado" incluso en HTTPS real
+   * (se probó en producción) — quedó reportado a soporte de Conekta por separado.
+   * La confirmación real del pago la sigue haciendo el webhook `order.paid`, no el
+   * regreso del navegador a `successUrl` (eso es solo para la UX).
    */
   static async crearOrdenEnganche(
     cliente: string,
     email: string,
     telefono: string,
     modelo: string,
-    enganche: number
-  ): Promise<{ orderId: string; checkoutId: string }> {
+    enganche: number,
+    successUrl: string,
+    failureUrl: string
+  ): Promise<{ orderId: string; checkoutUrl: string }> {
     if (!this.API_KEY) {
       throw new Error('CONEKTA_API_KEY no está configurado en el servidor.');
     }
@@ -105,15 +107,17 @@ export class ConektaService {
     const telefonoLimpio = telefono.replace(/\D/g, '');
     const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
 
-    console.log(`[Conekta] Creando orden de enganche (Checkout Component) para ${cliente} por $${enganche} MXN`);
+    console.log(`[Conekta] Creando orden de enganche (Hosted Payment) para ${cliente} por $${enganche} MXN`);
 
     const response = await axios.post(
       `${this.BASE_URL}/orders`,
       {
         checkout: {
           allowed_payment_methods: ['card'],
-          type: 'Integration',
-          name: `Enganche de celular - ${modelo}`
+          type: 'HostedPayment',
+          name: `Enganche de celular - ${modelo}`,
+          success_url: successUrl,
+          failure_url: failureUrl
         },
         customer_info: { name: cliente, email, phone: telefonoFormateado },
         pre_authorize: false,
@@ -125,8 +129,11 @@ export class ConektaService {
       this.headers
     );
 
-    console.log('[Conekta] Orden creada con éxito:', response.data.id, '— checkout:', response.data.checkout?.id);
-    return { orderId: response.data.id, checkoutId: response.data.checkout.id };
+    const checkoutId: string = response.data.checkout.id;
+    const checkoutUrl = `https://pay.conekta.com/link/${checkoutId.replace(/-/g, '')}`;
+
+    console.log('[Conekta] Orden creada con éxito:', response.data.id, '— checkout:', checkoutUrl);
+    return { orderId: response.data.id, checkoutUrl };
   }
 
   /**
