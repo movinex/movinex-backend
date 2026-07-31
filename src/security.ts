@@ -2,8 +2,8 @@ import crypto from 'crypto';
 
 export function verifyConektaSignature(payload: string, signature: string, publicKey: string): boolean {
   if (!signature) {
-    console.log('[Conekta Security] Sin firma. Bypass activado.');
-    return true;
+    console.warn('[Conekta Security] Petición sin firma rechazada.');
+    return false;
   }
 
   try {
@@ -11,11 +11,11 @@ export function verifyConektaSignature(payload: string, signature: string, publi
     const verify = crypto.createVerify('SHA256');
     verify.update(payload);
     verify.end();
-    
+
     return verify.verify(cleanKey, signature, 'base64');
   } catch (err: any) {
     console.error('[Conekta Security] Error al verificar firma RSA:', err.message);
-    return true;
+    return false;
   }
 }
 

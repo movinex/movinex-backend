@@ -6,6 +6,7 @@ import { PersistenceService } from './persistenceService';
 import { VerificamexService } from './verificamexService';
 import { ConektaService } from './conektaService';
 import { SkydropxService } from './skydropxService';
+import { WhatsappOtpService } from './whatsappOtpService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import { SuperadminService } from './superadminService';
 import { requireAdminAuth } from './adminAuth';
@@ -346,23 +347,66 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
   }
 });
 
-// TEMPORAL: mientras no esté integrado el webhook real de Conekta, el frontend
-// confirma el pago del enganche "a mano" en vez de esperar la notificación real.
-// Borrar este endpoint (y volver al polling de /api/solicitudes/estatus vía webhook)
-// cuando Conekta esté integrado de verdad.
-app.post('/api/solicitudes/:id/confirmar-pago-simulado', async (req: Request, res: Response) => {
+// POST: Enviar código OTP por WhatsApp (paso previo al pago del enganche)
+app.post('/api/otp/enviar', async (req: Request, res: Response) => {
+  try {
+    const { celular } = req.body;
+    if (!celular || String(celular).replace(/\D/g, '').length !== 10) {
+      return res.status(400).json({ error: 'Se requiere un celular válido de 10 dígitos.' });
+    }
+
+    const { mock } = await WhatsappOtpService.enviarCodigo(celular);
+    return res.status(200).json({ success: true, mock });
+  } catch (error: any) {
+    console.error('Error al enviar OTP:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo enviar el código de verificación.' });
+  }
+});
+
+// POST: Verificar código OTP enviado por WhatsApp
+app.post('/api/otp/verificar', async (req: Request, res: Response) => {
+  try {
+    const { celular, codigo } = req.body;
+    if (!celular || !codigo) {
+      return res.status(400).json({ error: 'Se requieren celular y código.' });
+    }
+
+    const verificado = await WhatsappOtpService.verificarCodigo(celular, String(codigo));
+    if (!verificado) {
+      return res.status(400).json({ verificado: false, error: 'Código incorrecto o expirado.' });
+    }
+
+    return res.status(200).json({ verificado: true });
+  } catch (error: any) {
+    console.error('Error al verificar OTP:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo verificar el código.' });
+  }
+});
+
+// POST: Crea la Orden del enganche para pagarla con el Checkout Component embebido de
+// Conekta. La confirmación real del pago llega después por el webhook order.paid.
+app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const solicitud = await PersistenceService.marcarPagoConfirmadoPorId(id);
 
+    const solicitud = await PersistenceService.getSolicitudById(id);
     if (!solicitud) {
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    return res.status(200).json({ success: true, solicitud });
+    const { orderId, checkoutId } = await ConektaService.crearOrdenEnganche(
+      solicitud.cliente,
+      solicitud.email,
+      solicitud.celular,
+      solicitud.modelo,
+      Number(solicitud.enganche)
+    );
+
+    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, esperando pago vía Checkout Component.`);
+    return res.status(200).json({ success: true, checkoutId });
   } catch (error: any) {
-    console.error('Error al confirmar pago simulado:', error);
-    return res.status(500).json({ error: error.message || 'Ocurrió un error al confirmar el pago.' });
+    console.error('Error al crear la orden del enganche:', error.response?.data || error.message);
+    return res.status(500).json({ error: error.message || 'Ocurrió un error al iniciar el pago del enganche.' });
   }
 });
 
@@ -426,7 +470,7 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const skydropxResponse = await SkydropxService.crearEnvio(
+    const { trackingNumber, labelUrl, simulado } = await SkydropxService.crearEnvio(
       solicitud.cliente,
       solicitud.celular,
       solicitud.email,
@@ -442,17 +486,21 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       solicitud.modelo
     );
 
-    const trackingNumber = skydropxResponse?.data?.attributes?.tracking_number ||
-                            skydropxResponse?.data?.tracking_number || null;
+    if (simulado) {
+      console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
+    }
 
-    const solicitudFinal = trackingNumber
-      ? await PersistenceService.guardarTrackingNumber(id, trackingNumber)
-      : solicitud;
+    const [solicitudesActualizadas] = await PersistenceService.updateEstatusByContacto(
+      solicitud.email,
+      'Preparando paquete',
+      { tracking_number: trackingNumber, label_url: labelUrl }
+    );
 
     return res.status(200).json({
       success: true,
-      solicitud: solicitudFinal,
-      trackingNumber
+      solicitud: solicitudesActualizadas || solicitud,
+      trackingNumber,
+      labelUrl
     });
   } catch (error: any) {
     console.error('Error al guardar domicilio y generar envío:', error);

@@ -91,16 +91,24 @@ export class VerificamexService {
     }
   }
 
+  /**
+   * NOTA: existió una versión de esto que combinaba OCR + biometría en una sola llamada
+   * a /validations/basic, para poder usar el score numérico del check Biometrics_FaceMatching
+   * en vez de este booleano ciego. Se revirtió porque /validations/basic devuelve
+   * consistentemente 500 Server Error (confirmado con las 3 imágenes reales, no es un
+   * problema de nuestro payload — coincide exacto con la doc de Verificamex). Reportarlo
+   * a su soporte; mientras tanto quedamos con isMatch sin score ni umbral configurable.
+   */
   static async validarIdentidadBiometrica(ineFrontBase64: string, selfieBase64: string, emailCliente?: string): Promise<{ valido: boolean; score: number; rawData: any }> {
     try {
       const esPruebaReal = emailCliente && emailCliente.toLowerCase().includes('real');
 
       if (!this.API_KEY || !esPruebaReal) {
         console.log(`[Verificamex MOCK] Aprobando biométrico localmente (Simulado).`);
-        return { 
-          valido: true, 
-          score: 0.95, 
-          rawData: { mock: true, confidence: 0.95 } 
+        return {
+          valido: true,
+          score: 0.95,
+          rawData: { mock: true, confidence: 0.95 }
         };
       }
 

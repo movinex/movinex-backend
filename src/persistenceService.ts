@@ -83,19 +83,6 @@ export class PersistenceService {
     return data[0];
   }
 
-  // TEMPORAL: mientras no esté integrado el webhook real de Conekta, el pago se
-  // confirma directo por id en vez de esperar la notificación de Conekta.
-  static async marcarPagoConfirmadoPorId(id: string) {
-    const { data, error } = await supabase
-      .from('solicitudes')
-      .update({ pago_confirmado: true })
-      .eq('id', id)
-      .select();
-
-    if (error) throw error;
-    return data[0];
-  }
-
   static async updateEstatus(id: string, nuevoEstatus: 'Aprobado' | 'Rechazado') {
     const { data, error } = await supabase
       .from('solicitudes')
@@ -115,6 +102,9 @@ export class PersistenceService {
     if (extraData?.tracking_number) {
       updateFields.tracking_number = extraData.tracking_number;
     }
+    if (extraData?.label_url) {
+      updateFields.label_url = extraData.label_url;
+    }
 
     const { data, error } = await supabase
       .from('solicitudes')
@@ -126,13 +116,15 @@ export class PersistenceService {
     return data;
   }
 
+  // Confirma el pago del enganche (llamado desde el webhook order.paid) y avanza el
+  // estatus a "Pendiente de envío" en la misma actualización.
   static async marcarPagoConfirmadoByContacto(contacto: string) {
     const telefonoLimpio = contacto.replace(/\D/g, '');
     const telefonoSinPrefijo = telefonoLimpio.slice(-10);
 
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ pago_confirmado: true })
+      .update({ pago_confirmado: true, estatus: 'Pendiente de envío' })
       .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
       .select();
 
@@ -175,15 +167,58 @@ export class PersistenceService {
     return data[0];
   }
 
-  static async guardarTrackingNumber(id: string, trackingNumber: string) {
+  static async guardarOtp(celular: string, codigo: string, expiraEn: Date) {
     const { data, error } = await supabase
-      .from('solicitudes')
-      .update({ tracking_number: trackingNumber })
-      .eq('id', id)
+      .from('otp_codigos')
+      .insert([{ celular, codigo, expira_en: expiraEn.toISOString() }])
       .select();
 
     if (error) throw error;
     return data[0];
+  }
+
+  // Trae el código OTP vigente (no expirado) más reciente para ese celular.
+  static async getOtpVigente(celular: string) {
+    const { data, error } = await supabase
+      .from('otp_codigos')
+      .select('*')
+      .eq('celular', celular)
+      .gt('expira_en', new Date().toISOString())
+      .order('creado_en', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async incrementarIntentoOtp(id: string, intentos: number) {
+    const { error } = await supabase
+      .from('otp_codigos')
+      .update({ intentos })
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  static async eliminarOtp(id: string) {
+    const { error } = await supabase
+      .from('otp_codigos')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  static async getSolicitudById(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
   }
 
   static async getSolicitudes() {
