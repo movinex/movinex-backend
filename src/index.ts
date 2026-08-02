@@ -407,7 +407,7 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
     }
 
     const origin = req.get('origin') || 'https://www.movinex.mx';
-    const successUrl = `${origin}/?pago_exitoso=1&solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+    const successUrl = `${origin}/domicilio?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
     const failureUrl = `${origin}/?pago_fallido=1`;
 
     const { orderId, checkoutUrl } = await ConektaService.crearOrdenEnganche(
