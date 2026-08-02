@@ -38,8 +38,13 @@ const apiLimiter = rateLimit({
 
 // Middleware de seguridad y parseo
 app.use(helmet());
+const ALLOWED_ORIGINS = [
+  'https://www.movinex.mx',
+  'https://movinex.mx',
+  'http://localhost:10173',
+];
 app.use(cors({
-  origin: '*' 
+  origin: ALLOWED_ORIGINS,
 }));
 app.use('/api/', apiLimiter); // Aplicar protección a todas las rutas bajo /api/
 app.use(express.json({ limit: '50mb' })); 
@@ -77,7 +82,10 @@ app.get('/playground', (req: Request, res: Response) => {
         
         <label>Monto de Pago Simulado ($ MXN):</label>
         <input type="number" id="monto" value="375">
-        
+
+        <label>Conekta Customer ID (opcional — para probar la suscripción semanal automática):</label>
+        <input type="text" id="customerId" placeholder="cus_xxxxxxxxxxxx">
+
         <button onclick="enviarPago()">Simular Pago Exitoso (order.paid)</button>
         
         <div id="logs">Consola del simulador...</div>
@@ -87,16 +95,24 @@ app.get('/playground', (req: Request, res: Response) => {
         async function enviarPago() {
           const contacto = document.getElementById('contacto').value.trim();
           const monto = document.getElementById('monto').value;
+          const customerId = document.getElementById('customerId').value.trim();
           const logs = document.getElementById('logs');
-          
+
           if(!contacto) {
             alert('Ingresa el email o celular del cliente.');
             return;
           }
-          
+
           logs.innerHTML += '\\n[Simulador] Desencadenando webhook order.paid...';
-          
+
           try {
+            const customerInfo = {
+              name: 'Cliente Simulador',
+              email: contacto.includes('@') ? contacto : 'simulado@movinex.mx',
+              phone: !contacto.includes('@') ? contacto : '5500000000'
+            };
+            if (customerId) customerInfo.customer_id = customerId;
+
             const res = await fetch('/api/webhooks/conekta', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -106,11 +122,7 @@ app.get('/playground', (req: Request, res: Response) => {
                   object: {
                     id: 'ord_simulated_' + Math.floor(Math.random() * 100000),
                     amount: parseFloat(monto) * 100,
-                    customer_info: {
-                      name: 'Cliente Simulador',
-                      email: contacto.includes('@') ? contacto : 'simulado@movinex.mx',
-                      phone: !contacto.includes('@') ? contacto : '5500000000'
-                    }
+                    customer_info: customerInfo
                   }
                 }
               })
@@ -664,6 +676,36 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
 
         if (solicitudesActualizadas && solicitudesActualizadas.length > 0) {
           console.log(`[Conekta Webhook] Pago confirmado para ${solicitudesActualizadas.length} solicitud(es) del cliente.`);
+
+          // Conekta arma un Customer aun en HostedPayment cuando la orden incluye customer_info,
+          // y lo devuelve como customer_info.customer_id en este mismo evento. En cuanto esa cuenta
+          // tenga Early Access a Tarjetas Guardadas y ese customer traiga una tarjeta por default,
+          // esto arma el Plan + Subscription semanal sin que haya que tocar código de nuevo.
+          const conektaCustomerId = customerInfo?.customer_id;
+
+          if (conektaCustomerId) {
+            for (const solicitud of solicitudesActualizadas) {
+              try {
+                const { planId, subscriptionId } = await ConektaService.crearSuscripcionSemanal(
+                  solicitud.id,
+                  conektaCustomerId,
+                  Number(solicitud.pago_semanal),
+                  Number(solicitud.semanas)
+                );
+                await PersistenceService.guardarSuscripcionConekta(solicitud.id, conektaCustomerId, subscriptionId);
+                console.log(`[Conekta Webhook] Suscripción semanal ${subscriptionId} (plan ${planId}) creada para la solicitud ${solicitud.id}.`);
+              } catch (subError: any) {
+                console.error(
+                  `[Conekta Webhook] No se pudo crear la suscripción semanal de la solicitud ${solicitud.id}: ` +
+                  `${subError.response?.data?.details?.[0]?.message || subError.message}. ` +
+                  `El enganche ya quedó cobrado y confirmado igual — si el error menciona una tarjeta o ` +
+                  `payment source por default, es porque la cuenta de Conekta aún no tiene Early Access a Tarjetas Guardadas.`
+                );
+              }
+            }
+          } else {
+            console.warn(`[Conekta Webhook] La orden ${order.id} no trajo customer_id — no se puede armar la suscripción semanal automática todavía.`);
+          }
         } else {
           console.warn(`[Conekta Webhook] No se encontró ninguna solicitud de crédito que coincida con el contacto: ${identificador}`);
         }

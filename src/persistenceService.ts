@@ -132,6 +132,18 @@ export class PersistenceService {
     return data;
   }
 
+  // Guarda las referencias de Conekta una vez armada la suscripción semanal automática.
+  static async guardarSuscripcionConekta(id: string, conektaCustomerId: string, conektaSubscriptionId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ conekta_customer_id: conektaCustomerId, conekta_subscription_id: conektaSubscriptionId })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
   static async getEstatusPagoByContacto(contacto: string) {
     const telefonoLimpio = contacto.replace(/\D/g, '');
     const telefonoSinPrefijo = telefonoLimpio.slice(-10);
