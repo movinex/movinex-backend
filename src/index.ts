@@ -395,8 +395,8 @@ app.post('/api/otp/verificar', async (req: Request, res: Response) => {
   }
 });
 
-// POST: Crea la Orden del enganche como Hosted Payment de Conekta y devuelve la URL a
-// donde redirigir al cliente. La confirmación real del pago llega por el webhook order.paid.
+// POST: Crea la Orden del enganche para pagarla con el Checkout Component embebido de
+// Conekta. La confirmación real del pago llega después por el webhook order.paid.
 app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -406,25 +406,43 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const origin = req.get('origin') || 'https://www.movinex.mx';
-    const successUrl = `${origin}/domicilio?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
-    const failureUrl = `${origin}/?pago_fallido=1`;
-
-    const { orderId, checkoutUrl } = await ConektaService.crearOrdenEnganche(
+    const { orderId, checkoutId } = await ConektaService.crearOrdenEnganche(
       solicitud.cliente,
       solicitud.email,
       solicitud.celular,
       solicitud.modelo,
-      Number(solicitud.enganche),
-      successUrl,
-      failureUrl
+      Number(solicitud.enganche)
     );
 
-    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, redirigiendo a Hosted Payment.`);
-    return res.status(200).json({ success: true, checkoutUrl });
+    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, esperando pago vía Checkout Component.`);
+    return res.status(200).json({ success: true, checkoutId });
   } catch (error: any) {
     console.error('Error al crear la orden del enganche:', error.response?.data || error.message);
     return res.status(500).json({ error: error.message || 'Ocurrió un error al iniciar el pago del enganche.' });
+  }
+});
+
+// POST: Bypass TEMPORAL para marcar el enganche como pagado sin pasar por Conekta,
+// mientras la cuenta de Conekta siga sin validar (ver Trello MX-0058) y el checkout
+// no deje completar un pago real. Pensado solo para poder seguir probando el resto
+// del flujo (Skydropx/Domicilio) — quitar en cuanto Conekta apruebe la cuenta.
+app.post('/api/solicitudes/:id/aprobar-pago-manual', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    const identificador = solicitud.email || solicitud.celular;
+    await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
+
+    console.warn(`[BYPASS MANUAL] Enganche de la solicitud ${id} (${identificador}) marcado como pagado SIN pasar por Conekta.`);
+    return res.status(200).json({ success: true });
+  } catch (error: any) {
+    console.error('Error en aprobar-pago-manual:', error.message);
+    return res.status(500).json({ error: 'No se pudo aprobar el pago manualmente.' });
   }
 });
 
