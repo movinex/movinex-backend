@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { PersistenceService } from './persistenceService';
 
-const OTP_TTL_MINUTOS = 5;
+const OTP_TTL_MINUTOS = 10;
 const MAX_INTENTOS = 5;
 
 export class WhatsappOtpService {
@@ -75,7 +75,11 @@ export class WhatsappOtpService {
       return false;
     }
 
-    await PersistenceService.eliminarOtp(otp.id);
+    // No se borra: queda marcado como verificado para que POST /api/solicitudes pueda
+    // confirmar server-side que este número realmente pasó por el OTP (si solo lo
+    // validáramos en el frontend, un bot podría pegarle directo a la API y saltárselo).
+    // Sigue siendo válido solo hasta expira_en, la misma ventana de 10 minutos del código.
+    await PersistenceService.marcarOtpVerificado(otp.id);
     return true;
   }
 }

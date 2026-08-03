@@ -222,6 +222,32 @@ export class PersistenceService {
     if (error) throw error;
   }
 
+  static async marcarOtpVerificado(id: string) {
+    const { error } = await supabase
+      .from('otp_codigos')
+      .update({ verificado: true })
+      .eq('id', id);
+
+    if (error) throw error;
+  }
+
+  // Confirma server-side que este celular verificó su OTP hace poco (dentro de la
+  // misma ventana de expira_en) — usado como gate anti-bot antes de crear una solicitud.
+  static async getOtpVerificado(celular: string) {
+    const { data, error } = await supabase
+      .from('otp_codigos')
+      .select('id')
+      .eq('celular', celular)
+      .eq('verificado', true)
+      .gt('expira_en', new Date().toISOString())
+      .order('creado_en', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
   static async getSolicitudById(id: string) {
     const { data, error } = await supabase
       .from('solicitudes')

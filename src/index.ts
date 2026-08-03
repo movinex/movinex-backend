@@ -283,6 +283,14 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     let cliente = req.body.cliente || 'Pendiente de verificación';
     let curp: string | null = null;
 
+    // Gate anti-bot: no aceptar la solicitud si este celular no verificó su OTP de
+    // WhatsApp hace poco. Se valida server-side (no solo en el frontend) para que no
+    // se pueda saltear pegándole directo a este endpoint.
+    const otpVerificado = await PersistenceService.getOtpVerificado(celular);
+    if (!otpVerificado) {
+      return res.status(400).json({ error: 'Verifica tu número de WhatsApp antes de continuar.' });
+    }
+
     console.log(`[Backend] Procesando nueva solicitud para: ${cliente} (${celular})`);
 
     // 1. Validar el teléfono usando Verificamex
