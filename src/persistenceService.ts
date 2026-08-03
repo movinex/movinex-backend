@@ -270,6 +270,10 @@ export class PersistenceService {
   }
 
   static async createCelular(datos: any) {
+    const enganche = Number(datos.enganche);
+    const montoSemanal26 = Number(datos.monto_semanal_26);
+    const montoSemanal52 = Number(datos.monto_semanal_52);
+
     const { data, error } = await supabase
       .from('celulares')
       .insert([
@@ -278,9 +282,11 @@ export class PersistenceService {
           modelo: datos.modelo,
           marca: datos.marca,
           precio_base: Number(datos.precio_base),
-          enganche: Number(datos.enganche),
-          monto_semanal_26: Number(datos.monto_semanal_26),
-          monto_semanal_52: Number(datos.monto_semanal_52),
+          enganche,
+          monto_semanal_26: montoSemanal26,
+          monto_semanal_52: montoSemanal52,
+          total_pagar_26: montoSemanal26 * 26 + enganche,
+          total_pagar_52: montoSemanal52 * 52 + enganche,
           imagen: datos.imagen,
           envio_gratis: datos.envio_gratis !== false,
           costo_envio: Number(datos.costo_envio || 0),
@@ -306,15 +312,21 @@ export class PersistenceService {
   }
 
   static async updateCelular(id: string, datos: any) {
+    const enganche = Number(datos.enganche);
+    const montoSemanal26 = Number(datos.monto_semanal_26);
+    const montoSemanal52 = Number(datos.monto_semanal_52);
+
     const { data, error } = await supabase
       .from('celulares')
       .update({
         modelo: datos.modelo,
         marca: datos.marca,
         precio_base: Number(datos.precio_base),
-        enganche: Number(datos.enganche),
-        monto_semanal_26: Number(datos.monto_semanal_26),
-        monto_semanal_52: Number(datos.monto_semanal_52),
+        enganche,
+        monto_semanal_26: montoSemanal26,
+        monto_semanal_52: montoSemanal52,
+        total_pagar_26: montoSemanal26 * 26 + enganche,
+        total_pagar_52: montoSemanal52 * 52 + enganche,
         imagen: datos.imagen,
         envio_gratis: datos.envio_gratis !== false,
         costo_envio: Number(datos.costo_envio || 0),
