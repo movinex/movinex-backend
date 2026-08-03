@@ -83,7 +83,7 @@ export class PersistenceService {
     return data[0];
   }
 
-  static async updateEstatus(id: string, nuevoEstatus: 'Aprobado' | 'Rechazado') {
+  static async updateEstatus(id: string, nuevoEstatus: 'Aprobado' | 'Rechazado' | 'Pendiente de envío' | 'Preparando paquete' | 'Enviado') {
     const { data, error } = await supabase
       .from('solicitudes')
       .update({ estatus: nuevoEstatus })

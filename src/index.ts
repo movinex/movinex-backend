@@ -573,8 +573,9 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
   try {
     const { id } = req.params;
     const { estatus } = req.body;
+    const ESTATUS_VALIDOS = ['Aprobado', 'Rechazado', 'Pendiente de envío', 'Preparando paquete', 'Enviado'];
 
-    if (estatus !== 'Aprobado' && estatus !== 'Rechazado') {
+    if (!ESTATUS_VALIDOS.includes(estatus)) {
       return res.status(400).json({ error: 'Estatus no válido.' });
     }
 
