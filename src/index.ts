@@ -534,15 +534,16 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
     }
 
-    const [solicitudesActualizadas] = await PersistenceService.updateEstatusByContacto(
-      solicitud.email,
-      'Preparando paquete',
-      { tracking_number: trackingNumber, label_url: labelUrl }
-    );
+    // No se toca el estatus acá: lo mueve el admin a mano (Preparando paquete ->
+    // Pendiente de envío -> Enviado). Esto solo guarda el domicilio y la guía.
+    const solicitudActualizada = await PersistenceService.guardarEnvio(id, {
+      tracking_number: trackingNumber,
+      label_url: labelUrl
+    });
 
     return res.status(200).json({
       success: true,
-      solicitud: solicitudesActualizadas || solicitud,
+      solicitud: solicitudActualizada || solicitud,
       trackingNumber,
       labelUrl
     });
@@ -580,11 +581,33 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
 app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { estatus } = req.body;
-    const ESTATUS_VALIDOS = ['Aprobado', 'Rechazado', 'Pendiente de envío', 'Preparando paquete', 'Enviado'];
+    const { estatus, imei } = req.body;
 
+    if (imei !== undefined) {
+      if (!String(imei).trim()) {
+        return res.status(400).json({ error: 'El IMEI no puede estar vacío.' });
+      }
+      await PersistenceService.guardarImei(id, String(imei).trim());
+    }
+
+    if (estatus === undefined) {
+      const solicitudActualizada = await PersistenceService.getSolicitudById(id);
+      return res.status(200).json(solicitudActualizada);
+    }
+
+    const ESTATUS_VALIDOS = ['Aprobado', 'Rechazado', 'Pendiente de envío', 'Preparando paquete', 'Enviado'];
     if (!ESTATUS_VALIDOS.includes(estatus)) {
       return res.status(400).json({ error: 'Estatus no válido.' });
+    }
+
+    // No se puede marcar como Enviado sin haber cargado el IMEI antes — se valida acá
+    // (no solo en el frontend) para que quede realmente exigido.
+    if (estatus === 'Enviado') {
+      const solicitudActual = await PersistenceService.getSolicitudById(id);
+      const imeiFinal = imei !== undefined ? imei : solicitudActual?.imei;
+      if (!imeiFinal || !String(imeiFinal).trim()) {
+        return res.status(400).json({ error: 'Falta cargar el IMEI antes de marcar como enviado.' });
+      }
     }
 
     const solicitudActualizada = await PersistenceService.updateEstatus(id, estatus);

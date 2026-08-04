@@ -17,7 +17,7 @@ yarn-error.log*
 # Compilaciones
 dist/
 build/
-.tsbuildinfo
+*.tsbuildinfo
 
 # IDE y Editores
 .vscode/

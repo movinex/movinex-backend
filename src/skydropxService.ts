@@ -1,34 +1,94 @@
 import axios from 'axios';
 
 export class SkydropxService {
-  private static API_KEY = process.env.SKYDROPX_API_KEY;
-  private static BASE_URL = 'https://api.skydropx.com/v1';
+  private static BASE_URL = process.env.SKYDROPX_BASE_URL || 'https://sb-pro.skydropx.com';
+  private static CLIENT_ID = process.env.SKYDROPX_CLIENT_ID;
+  private static CLIENT_SECRET = process.env.SKYDROPX_CLIENT_SECRET;
+
+  // Igual que Verificamex: si el email de la solicitud contiene "real", se usa la
+  // API de producción de Skydropx en vez del sandbox.
+  private static PROD_BASE_URL = process.env.SKYDROPX_PROD_BASE_URL || 'https://api-pro.skydropx.com';
+  private static PROD_CLIENT_ID = process.env.SKYDROPX_PROD_CLIENT_ID;
+  private static PROD_CLIENT_SECRET = process.env.SKYDROPX_PROD_CLIENT_SECRET;
 
   private static REMITENTE_DEFAULT = {
     name: 'NVX Technologies',
-    street1: 'Av. Paseo de la Reforma 222',
-    street2: 'Piso 12',
-    city: 'Ciudad de México',
-    state: 'CDMX',
-    zip: '06600',
-    country: 'MX',
-    phone: '525555028744',
-    email: 'contacto@movinex.mx'
+    street1: 'Av. Paseo de la Reforma',
+    street_number: '222',
+    postal_code: '06600',
+    area_level1: 'Ciudad de Mexico',
+    area_level2: 'Cuauhtemoc',
+    area_level3: 'Juarez',
+    country_code: 'MX',
+    phone: '5215555028744',
+    email: 'contacto@movinex.mx',
+    reference: 'Oficina Movinex'
   };
 
-  private static get headers() {
-    return {
-      'Authorization': `Token token=${this.API_KEY}`,
-      'Content-Type': 'application/json'
-    };
+  // Clave SAT de producto/servicio para "Teléfonos móviles (Celular o Smartphone)",
+  // requerida por Skydropx Pro como consignment_note (Carta Porte) en cada paquete.
+  private static CONSIGNMENT_NOTE_CELULAR = '43191501';
+  // Código de embalaje (catálogo SAT/UN, Rec. 21) para caja de cartón.
+  private static PACKAGE_TYPE_CAJA = '4G';
+
+  // Cachés separados para sandbox y producción: son cuentas/tokens distintos.
+  private static tokenCacheSandbox: { token: string; expiresAt: number } | null = null;
+  private static tokenCacheProd: { token: string; expiresAt: number } | null = null;
+
+  // El token OAuth2 dura 2 horas (confirmado con la cuenta real); se cachea en memoria
+  // y se renueva solo cuando falta poco para vencer.
+  private static async getAccessToken(usarProduccion: boolean): Promise<string> {
+    const cache = usarProduccion ? this.tokenCacheProd : this.tokenCacheSandbox;
+    if (cache && cache.expiresAt > Date.now() + 30_000) {
+      return cache.token;
+    }
+
+    const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+    const clientId = usarProduccion ? this.PROD_CLIENT_ID : this.CLIENT_ID;
+    const clientSecret = usarProduccion ? this.PROD_CLIENT_SECRET : this.CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        usarProduccion
+          ? 'SKYDROPX_PROD_CLIENT_ID / SKYDROPX_PROD_CLIENT_SECRET no están configurados.'
+          : 'SKYDROPX_CLIENT_ID / SKYDROPX_CLIENT_SECRET no están configurados.'
+      );
+    }
+
+    const response = await axios.post(`${baseUrl}/api/v1/oauth/token`, {
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'client_credentials'
+    });
+
+    const { access_token, expires_in } = response.data;
+    const nuevoCache = { token: access_token, expiresAt: Date.now() + expires_in * 1000 };
+    if (usarProduccion) {
+      this.tokenCacheProd = nuevoCache;
+    } else {
+      this.tokenCacheSandbox = nuevoCache;
+    }
+    return access_token;
+  }
+
+  private static async authHeaders(usarProduccion: boolean) {
+    const token = await this.getAccessToken(usarProduccion);
+    return { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } };
+  }
+
+  private static esperar(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
-   * Genera una guía real siguiendo el flujo documentado de Skydropx (3 llamadas):
-   * cotizar (quotations) -> elegir tarifa -> crear la guía (labels).
-   * NOTA: el shape exacto de la respuesta de /quotations y /shipments puede variar
-   * respecto a lo documentado públicamente; falta validar contra su sandbox real
-   * con una API key de pruebas antes de dar esto por cerrado.
+   * Genera una guía real con Skydropx Pro (OAuth2). Igual que Verificamex: usa
+   * sandbox (sb-pro.skydropx.com) por default, y solo pasa a producción
+   * (SKYDROPX_PROD_*) si el email de la solicitud contiene la palabra "real".
+   * Flujo de 3 pasos, los dos primeros son asíncronos del lado de Skydropx:
+   *   1. POST /quotations -> se espera a que is_completed sea true (poll).
+   *   2. Se elige la tarifa más barata entre las que devolvieron success: true.
+   *   3. POST /shipments con esa tarifa -> se espera a que workflow_status sea
+   *      "success" para recién ahí tener tracking_number y label_url (poll).
    */
   static async crearEnvio(
     cliente: string,
@@ -46,78 +106,110 @@ export class SkydropxService {
     modelo: string
   ): Promise<{ trackingNumber: string; labelUrl: string | null; simulado?: boolean; rawData?: any }> {
     try {
-      if (!this.API_KEY) {
-        throw new Error('SKYDROPX_API_KEY no está configurada.');
-      }
+      // Igual que Verificamex: solo se usa la API real de Skydropx si el email
+      // de la solicitud contiene la palabra "real"; si no, siempre sandbox.
+      const usarProduccion = Boolean(email && email.toLowerCase().includes('real'));
+      const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
 
-      const street1 = `${domicilio.calle} ${domicilio.numeroExterior}${domicilio.numeroInterior ? ` Int. ${domicilio.numeroInterior}` : ''}`;
+      const telefonoLimpio = telefono.replace(/\D/g, '');
 
       const addressTo = {
         name: cliente,
-        street1,
-        street2: domicilio.colonia,
-        city: domicilio.alcaldiaMunicipio,
-        state: domicilio.estado,
-        zip: domicilio.codigoPostal,
-        country: 'MX',
-        phone: telefono.replace(/\D/g, ''),
-        email: email,
-        contents: `Celular Movinex ${modelo}`
+        street1: domicilio.calle,
+        street_number: domicilio.numeroExterior,
+        apartment_number: domicilio.numeroInterior || undefined,
+        postal_code: domicilio.codigoPostal,
+        area_level1: domicilio.estado,
+        area_level2: domicilio.alcaldiaMunicipio,
+        area_level3: domicilio.colonia,
+        country_code: 'MX',
+        phone: telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`,
+        email,
+        reference: `Celular Movinex ${modelo}`
       };
 
-      const parcels = [
-        {
-          weight: 1,
-          distance_unit: 'CM',
-          mass_unit: 'KG',
-          height: 10,
-          width: 15,
-          length: 20
-        }
-      ];
+      const auth = await this.authHeaders(usarProduccion);
 
-      // 1. Cotizar
-      console.log(`[Skydropx] Cotizando envío para ${cliente} a CP ${domicilio.codigoPostal}...`);
-      const cotizacion = await axios.post(
-        `${this.BASE_URL}/quotations`,
-        { address_from: this.REMITENTE_DEFAULT, address_to: addressTo, parcels },
-        { headers: this.headers }
+      // 1. Cotizar (asíncrono del lado de Skydropx)
+      console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Cotizando envío para ${cliente} a CP ${domicilio.codigoPostal}...`);
+      const cotizacionRes = await axios.post(
+        `${baseUrl}/api/v1/quotations`,
+        {
+          quotation: {
+            address_from: this.REMITENTE_DEFAULT,
+            address_to: addressTo,
+            parcels: [{ weight: 1, length: 20, width: 15, height: 10, distance_unit: 'CM', mass_unit: 'KG' }]
+          }
+        },
+        auth
       );
 
-      const tarifas = cotizacion.data?.data?.attributes?.rates || cotizacion.data?.rates || [];
-      if (!tarifas.length) {
+      const quotationId = cotizacionRes.data.id;
+      let quotation = cotizacionRes.data;
+      for (let intento = 0; intento < 8 && !quotation.is_completed; intento++) {
+        await this.esperar(2000);
+        const poll = await axios.get(`${baseUrl}/api/v1/quotations/${quotationId}`, auth);
+        quotation = poll.data;
+      }
+
+      const tarifasValidas = (quotation.rates || []).filter((r: any) => r.success && r.total);
+      if (!tarifasValidas.length) {
         throw new Error('Skydropx no devolvió tarifas disponibles para esta cotización.');
       }
 
       // 2. Elegir la tarifa más barata disponible
-      const tarifaElegida = [...tarifas].sort((a: any, b: any) => Number(a.total || a.price) - Number(b.total || b.price))[0];
-      const rateId = tarifaElegida.id || tarifaElegida.rate_id;
-      console.log(`[Skydropx] Tarifa elegida: ${tarifaElegida.provider_name || tarifaElegida.carrier || 'N/A'} (rate_id ${rateId})`);
+      const tarifaElegida = [...tarifasValidas].sort((a: any, b: any) => Number(a.total) - Number(b.total))[0];
+      console.log(`[Skydropx] Tarifa elegida: ${tarifaElegida.provider_display_name} ${tarifaElegida.provider_service_name} ($${tarifaElegida.total}, rate_id ${tarifaElegida.id})`);
 
-      // 3. Crear el envío/guía
-      const shipment = await axios.post(
-        `${this.BASE_URL}/shipments`,
-        { address_from: this.REMITENTE_DEFAULT, address_to: addressTo, parcels, rate_id: rateId },
-        { headers: this.headers }
+      // 3. Crear el envío con esa tarifa (también asíncrono)
+      const shipmentRes = await axios.post(
+        `${baseUrl}/api/v1/shipments`,
+        {
+          shipment: {
+            quotation_id: quotationId,
+            rate_id: tarifaElegida.id,
+            address_from: this.REMITENTE_DEFAULT,
+            address_to: addressTo,
+            packages: [
+              {
+                package_number: 1,
+                weight: 1,
+                length: 20,
+                width: 15,
+                height: 10,
+                consignment_note: this.CONSIGNMENT_NOTE_CELULAR,
+                package_type: this.PACKAGE_TYPE_CAJA
+              }
+            ]
+          }
+        },
+        auth
       );
 
-      const shipmentId = shipment.data?.data?.id;
-      const label = await axios.post(
-        `${this.BASE_URL}/labels`,
-        { rate_id: rateId, shipment_id: shipmentId, label_format: 'pdf' },
-        { headers: this.headers }
-      );
+      const shipmentId = shipmentRes.data.data.id;
+      let shipmentData = shipmentRes.data;
+      for (let intento = 0; intento < 10; intento++) {
+        const estado = shipmentData.data.attributes.workflow_status;
+        if (estado === 'success' || estado === 'failure') break;
+        await this.esperar(2000);
+        const poll = await axios.get(`${baseUrl}/api/v1/shipments/${shipmentId}`, auth);
+        shipmentData = poll.data;
+      }
 
-      const labelData = label.data?.data?.attributes || label.data?.data || label.data;
-      const trackingNumber = labelData?.tracking_number;
-      const labelUrl = labelData?.label_url || null;
+      if (shipmentData.data.attributes.workflow_status !== 'success') {
+        throw new Error(`Skydropx no pudo completar el envío (estado: ${shipmentData.data.attributes.workflow_status}, detalle: ${shipmentData.data.attributes.error_detail}).`);
+      }
+
+      const paquete = (shipmentData.included || []).find((i: any) => i.type === 'package');
+      const trackingNumber: string | undefined = paquete?.attributes?.tracking_number;
+      const labelUrl: string | null = paquete?.attributes?.label_url || null;
 
       if (!trackingNumber) {
         throw new Error('Skydropx no devolvió un número de rastreo para la guía generada.');
       }
 
-      console.log('[Skydropx] Guía generada con éxito. Tracking:', trackingNumber);
-      return { trackingNumber, labelUrl, rawData: label.data };
+      console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Guía generada con éxito. Tracking:`, trackingNumber);
+      return { trackingNumber, labelUrl, rawData: shipmentData };
 
     } catch (error: any) {
       console.error('[Skydropx] Error al generar la guía de envío:', error.response?.data || error.message);

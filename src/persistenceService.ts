@@ -117,14 +117,16 @@ export class PersistenceService {
   }
 
   // Confirma el pago del enganche (llamado desde el webhook order.paid) y avanza el
-  // estatus a "Pendiente de envío" en la misma actualización.
+  // estatus a "Preparando paquete" en la misma actualización — a partir de acá el
+  // admin arma la caja, carga el IMEI, y va avanzando el estatus a mano
+  // (Preparando paquete -> Pendiente de envío -> Enviado).
   static async marcarPagoConfirmadoByContacto(contacto: string) {
     const telefonoLimpio = contacto.replace(/\D/g, '');
     const telefonoSinPrefijo = telefonoLimpio.slice(-10);
 
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ pago_confirmado: true, estatus: 'Pendiente de envío' })
+      .update({ pago_confirmado: true, estatus: 'Preparando paquete' })
       .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
       .select();
 
@@ -137,6 +139,30 @@ export class PersistenceService {
     const { data, error } = await supabase
       .from('solicitudes')
       .update({ conekta_customer_id: conektaCustomerId, conekta_subscription_id: conektaSubscriptionId })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el
+  // estatus lo mueve el admin a mano (o el webhook de pago), no la generación de la guía.
+  static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null }) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update(datos)
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async guardarImei(id: string, imei: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ imei })
       .eq('id', id)
       .select();
 
