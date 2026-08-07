@@ -135,6 +135,8 @@ export class PersistenceService {
   }
 
   // Guarda las referencias de Conekta una vez armada la suscripción semanal automática.
+  // Sin uso mientras el procesador activo sea Stripe (ver guardarSuscripcionStripe) —
+  // se deja el método por si se retoma Conekta más adelante.
   static async guardarSuscripcionConekta(id: string, conektaCustomerId: string, conektaSubscriptionId: string) {
     const { data, error } = await supabase
       .from('solicitudes')
@@ -144,6 +146,93 @@ export class PersistenceService {
 
     if (error) throw error;
     return data[0];
+  }
+
+  // Guarda las referencias de Stripe una vez armada la suscripción semanal automática.
+  static async guardarSuscripcionStripe(id: string, stripeCustomerId: string, stripeSubscriptionId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ stripe_customer_id: stripeCustomerId, stripe_subscription_id: stripeSubscriptionId })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Guarda con qué tipo de payment_method se pagó el enganche ('card', 'oxxo',
+  // 'customer_balance') — decide si la solicitud queda en cobro automático (tarjeta,
+  // Stripe Subscription) o en cobro semanal manual por WhatsApp (OXXO/SPEI).
+  static async guardarMetodoPagoEnganche(id: string, metodo: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ metodo_pago_enganche: metodo })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Guarda la CLABE persistente asignada al Customer de Stripe (cobro semanal manual
+  // por saldo, ver stripeService.crearReferenciaPagoPersistente).
+  static async guardarReferenciaPagoPersistente(id: string, clabe: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ stripe_clabe_referencia: clabe })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Programa cuándo debe salir el próximo link de pago semanal por WhatsApp — lo usa
+  // tanto el webhook (primer cobro, 7 días después del enganche, igual que el trial de
+  // la Subscription) como cobrosSemanalesService (siguiente cobro, tras mandar un link).
+  static async programarProximoCobroSemanal(id: string, fecha: Date) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ proximo_cobro_semanal: fecha.toISOString() })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Trae las solicitudes en cobro semanal manual (OXXO/SPEI) a las que les toca recibir
+  // un nuevo link de pago hoy — cobrosSemanalesService las procesa una por una.
+  // El filtro semanas_pagadas < semanas se hace en JS porque PostgREST no soporta
+  // comparar dos columnas entre sí directamente en un `.lt()`.
+  static async getSolicitudesConCobroSemanalPendiente() {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .in('metodo_pago_enganche', ['oxxo', 'customer_balance'])
+      .eq('pago_confirmado', true)
+      .lte('proximo_cobro_semanal', new Date().toISOString());
+
+    if (error) throw error;
+    return (data || []).filter((s: any) => Number(s.semanas_pagadas || 0) < Number(s.semanas));
+  }
+
+  // Confirma un cobro semanal manual ya pagado (webhook invoice.paid, cobro por saldo
+  // vía la CLABE persistente) e incrementa el contador de semanas pagadas.
+  static async registrarPagoSemanalManual(id: string): Promise<{ semanas_pagadas: number; semanas: number }> {
+    const solicitud = await this.getSolicitudById(id);
+    if (!solicitud) throw new Error(`Solicitud ${id} no encontrada.`);
+
+    const semanasPagadas = Number(solicitud.semanas_pagadas || 0) + 1;
+
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ semanas_pagadas: semanasPagadas })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return { semanas_pagadas: semanasPagadas, semanas: Number(data[0].semanas) };
   }
 
   // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el

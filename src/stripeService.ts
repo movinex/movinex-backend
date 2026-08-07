@@ -1,0 +1,236 @@
+import Stripe from 'stripe';
+
+export class StripeService {
+  private static _client: Stripe | null = null;
+
+  private static get client(): Stripe {
+    if (!this._client) {
+      const apiKey = process.env.STRIPE_SECRET_KEY;
+      if (!apiKey) {
+        throw new Error('STRIPE_SECRET_KEY no está configurado en el servidor.');
+      }
+      this._client = new Stripe(apiKey);
+    }
+    return this._client;
+  }
+
+  /**
+   * Crea una Checkout Session hosteada por Stripe para el enganche, ofreciendo tarjeta,
+   * OXXO (voucher para pagar en efectivo en tienda) y SPEI (transferencia bancaria vía
+   * `customer_balance`/`mx_bank_transfer`). El frontend hace `window.location.href` a la
+   * `url` devuelta; el cliente paga en la página de Stripe y vuelve solo a `successUrl`.
+   *
+   * `setup_future_usage: 'off_session'` va SOLO en `payment_method_options.card` (no a
+   * nivel de PaymentIntent): OXXO y SPEI son de un solo uso, un cliente no puede quedar
+   * "guardado" para cobrarle automático con esos métodos, así que solo el pago con
+   * tarjeta deja lista la suscripción semanal automática — ver la nota en el webhook.
+   * `customer_creation: 'always'` garantiza que `session.customer` siempre venga
+   * poblado (por default Stripe solo crea Customer en modo "payment" si hace falta).
+   *
+   * La confirmación real llega después por webhook: `checkout.session.completed`
+   * (tarjeta, síncrono) o `checkout.session.async_payment_succeeded` (OXXO/SPEI, el
+   * cliente paga horas o días después de generar el voucher/CLABE).
+   */
+  static async crearCheckoutSession(
+    solicitudId: string,
+    cliente: string,
+    email: string,
+    telefono: string,
+    modelo: string,
+    enganche: number,
+    successUrl: string,
+    cancelUrl: string
+  ): Promise<{ sessionId: string; url: string }> {
+    const montoCentavos = Math.round(enganche * 100);
+    const telefonoLimpio = telefono.replace(/\D/g, '');
+    const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
+
+    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN (tarjeta/OXXO/SPEI)`);
+
+    const session = await this.client.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card', 'oxxo', 'customer_balance'],
+      payment_method_options: {
+        card: { setup_future_usage: 'off_session' },
+        customer_balance: {
+          funding_type: 'bank_transfer',
+          bank_transfer: { type: 'mx_bank_transfer' },
+        },
+      },
+      customer_email: email,
+      customer_creation: 'always',
+      line_items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product_data: { name: `Enganche de celular - ${modelo}` },
+            unit_amount: montoCentavos,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        solicitud_id: solicitudId,
+        tipo: 'enganche',
+        cliente,
+        telefono: telefonoFormateado,
+      },
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+    });
+
+    if (!session.url) {
+      throw new Error('Stripe no devolvió una URL de checkout.');
+    }
+
+    console.log('[Stripe] Checkout session creada con éxito:', session.id);
+    return { sessionId: session.id, url: session.url };
+  }
+
+  /**
+   * Lee el payment_method que quedó asociado a un PaymentIntent ya cobrado, junto con
+   * su tipo (`card`, `oxxo`, `customer_balance`) — el webhook lo usa para decidir si
+   * puede armar la suscripción semanal automática (solo si es `card`, ver arriba).
+   */
+  static async obtenerMetodoPagoDeIntent(paymentIntentId: string): Promise<{ paymentMethodId: string; tipo: string }> {
+    const paymentIntent = await this.client.paymentIntents.retrieve(paymentIntentId, {
+      expand: ['payment_method'],
+    });
+    const paymentMethod = paymentIntent.payment_method;
+    if (!paymentMethod) {
+      throw new Error(`El PaymentIntent ${paymentIntentId} no tiene payment_method asociado.`);
+    }
+    if (typeof paymentMethod === 'string') {
+      throw new Error(`El payment_method de ${paymentIntentId} no vino expandido.`);
+    }
+    return { paymentMethodId: paymentMethod.id, tipo: paymentMethod.type };
+  }
+
+  /**
+   * Deja la tarjeta usada en el pago del enganche como método de pago por default del
+   * Customer, para poder cobrarla off-session en la suscripción semanal.
+   */
+  static async fijarMetodoPagoDefault(customerId: string, paymentMethodId: string): Promise<void> {
+    await this.client.customers.update(customerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+  }
+
+  /**
+   * Crea la suscripción semanal sobre el Customer que acaba de pagar el enganche.
+   * `trial_period_days: 7` retrasa el primer cobro recurrente 7 días, igual que el Plan
+   * de Conekta. El precio se arma inline (`price_data`) porque el monto/plazo varían
+   * por solicitud — no hace falta un Price fijo predefinido en el dashboard de Stripe.
+   */
+  static async crearSuscripcionSemanal(
+    solicitudId: string,
+    customerId: string,
+    paymentMethodId: string,
+    pagoSemanal: number,
+    semanas: number
+  ): Promise<{ subscriptionId: string }> {
+    console.log(`[Stripe] Creando suscripción semanal de $${pagoSemanal} x ${semanas} semanas (trial 7 días) para ${customerId}`);
+
+    // A diferencia de Checkout Sessions, subscriptions.create no acepta product_data
+    // inline — el Price tiene que apuntar a un Product ya creado.
+    const product = await this.client.products.create({
+      name: `Pago semanal Movinex - ${solicitudId}`,
+    });
+
+    const subscription = await this.client.subscriptions.create({
+      customer: customerId,
+      default_payment_method: paymentMethodId,
+      trial_period_days: 7,
+      items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product: product.id,
+            unit_amount: Math.round(pagoSemanal * 100),
+            recurring: { interval: 'week' },
+          },
+        },
+      ],
+      metadata: { solicitud_id: solicitudId, semanas: String(semanas) },
+    });
+
+    console.log('[Stripe] Suscripción creada con éxito:', subscription.id);
+    return { subscriptionId: subscription.id };
+  }
+
+  /**
+   * Le da al Customer una CLABE fija y reutilizable (no ligada a un pago puntual) para
+   * que siempre transfiera/deposite al mismo número de referencia — decisión de
+   * negocio (reunión 07/08): en vez de un link de pago nuevo cada semana, el cliente
+   * paga siempre a la misma cuenta. Sirve tanto para SPEI (transferencia directa desde
+   * su banco) como para depositar efectivo en OXXO referenciando esa misma CLABE (un
+   * "depósito referenciado" bancario normal en México, nada específico de Stripe).
+   * `createFundingInstructions` es idempotente por customer+currency+tipo: llamarlo de
+   * nuevo para el mismo customer devuelve la misma CLABE, no crea una nueva.
+   */
+  static async crearReferenciaPagoPersistente(customerId: string): Promise<{ clabe: string; banco: string }> {
+    const instrucciones = await this.client.customers.createFundingInstructions(customerId, {
+      currency: 'mxn',
+      funding_type: 'bank_transfer',
+      bank_transfer: { type: 'mx_bank_transfer' },
+    });
+
+    const direccionSpei = instrucciones.bank_transfer.financial_addresses.find((d) => d.spei)?.spei;
+    if (!direccionSpei) {
+      throw new Error(`Stripe no devolvió una CLABE SPEI para el customer ${customerId}.`);
+    }
+
+    console.log(`[Stripe] CLABE de referencia persistente para ${customerId}: ${direccionSpei.clabe}`);
+    return { clabe: direccionSpei.clabe, banco: direccionSpei.bank_name };
+  }
+
+  /**
+   * Suscripción semanal para clientes sin tarjeta guardada (pagaron el enganche con
+   * OXXO/SPEI): `collection_method: 'send_invoice'` porque no hay ninguna tarjeta que
+   * cobrar automáticamente. Cuando el cliente deposita en su CLABE persistente
+   * (`crearReferenciaPagoPersistente`), Stripe acredita ese dinero al balance del
+   * Customer y lo aplica solo en cuanto se genera cada factura semanal — si el saldo
+   * alcanza, la factura queda pagada sin que nadie tenga que hacer nada más; si no
+   * alcanza, queda abierta hasta que el cliente deposite el resto (`invoice.paid` en
+   * el webhook es la señal de que sí alcanzó). `trial_period_days: 7` deja la primera
+   * factura para 7 días después del enganche, igual que la Subscription de tarjeta.
+   */
+  static async crearSuscripcionConSaldo(
+    solicitudId: string,
+    customerId: string,
+    pagoSemanal: number,
+    semanas: number
+  ): Promise<{ subscriptionId: string }> {
+    console.log(`[Stripe] Creando suscripción (cobro por saldo/CLABE) de $${pagoSemanal} x ${semanas} semanas (trial 7 días) para ${customerId}`);
+
+    const product = await this.client.products.create({
+      name: `Pago semanal Movinex - ${solicitudId}`,
+    });
+
+    const subscription = await this.client.subscriptions.create({
+      customer: customerId,
+      collection_method: 'send_invoice',
+      days_until_due: 7,
+      trial_period_days: 7,
+      items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product: product.id,
+            unit_amount: Math.round(pagoSemanal * 100),
+            recurring: { interval: 'week' },
+          },
+        },
+      ],
+      metadata: { solicitud_id: solicitudId, semanas: String(semanas) },
+    });
+
+    console.log('[Stripe] Suscripción (cobro por saldo) creada con éxito:', subscription.id);
+    return { subscriptionId: subscription.id };
+  }
+
+  /** Verifica la firma del webhook usando el signing secret del endpoint en Stripe. */
+  static construirEventoWebhook(rawBody: Buffer, signature: string, webhookSecret: string): Stripe.Event {
+    return this.client.webhooks.constructEvent(rawBody, signature, webhookSecret);
+  }
+}

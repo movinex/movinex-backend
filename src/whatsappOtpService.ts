@@ -8,6 +8,7 @@ export class WhatsappOtpService {
   private static ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
   private static PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
+  private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
   private static GRAPH_URL = 'https://graph.facebook.com/v20.0';
 
@@ -61,6 +62,65 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp OTP] Error al enviar el código:', error.response?.data || error.message);
       throw new Error('No se pudo enviar el código de verificación por WhatsApp.');
+    }
+  }
+
+  /**
+   * Manda la referencia de pago (CLABE persistente) para el cobro semanal manual —
+   * ver `StripeService.crearReferenciaPagoPersistente` y `cobrosSemanalesService.ts`.
+   * Un mismo mensaje sirve para dos momentos: (1) una sola vez, apenas se confirma el
+   * enganche, para avisarle al cliente su CLABE fija; (2) cada semana después, como
+   * recordatorio con el mismo número — nunca cambia (decisión de negocio, reunión
+   * 07/08: una referencia fija en vez de un link nuevo cada vez). Usa la plantilla
+   * `WHATSAPP_COBRO_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
+   */
+  static async enviarRecordatorioPagoSemanal(
+    celular: string,
+    cliente: string,
+    clabe: string,
+    monto: number,
+    numeroSemana: number
+  ): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Cobro Semanal MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN a la CLABE ${clabe}`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: celular.startsWith('52') ? celular : `52${celular}`,
+          type: 'template',
+          template: {
+            name: this.COBRO_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: String(numeroSemana) },
+                  { type: 'text', text: monto.toLocaleString('es-MX') },
+                  { type: 'text', text: clabe }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Cobro Semanal] Recordatorio de la semana #${numeroSemana} enviado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Cobro Semanal] Error al enviar el recordatorio:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar el recordatorio de pago semanal por WhatsApp.');
     }
   }
 

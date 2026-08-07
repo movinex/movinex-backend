@@ -5,6 +5,8 @@ import dotenv from 'dotenv';
 import { PersistenceService } from './persistenceService';
 import { VerificamexService } from './verificamexService';
 import { ConektaService } from './conektaService';
+import { StripeService } from './stripeService';
+import { CobrosSemanalesService } from './cobrosSemanalesService';
 import { SkydropxService } from './skydropxService';
 import { WhatsappOtpService } from './whatsappOtpService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
@@ -13,12 +15,14 @@ import { requireAdminAuth } from './adminAuth';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJsdoc from 'swagger-jsdoc';
 import rateLimit from 'express-rate-limit';
+import cron from 'node-cron';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 10500;
 const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
 // Indicar a Express que confíe en los proxies (necesario en Railway / Heroku para rateLimit)
@@ -47,7 +51,17 @@ app.use(cors({
   origin: ALLOWED_ORIGINS,
 }));
 app.use('/api/', apiLimiter); // Aplicar protección a todas las rutas bajo /api/
-app.use(express.json({ limit: '50mb' })); 
+
+// El webhook de Stripe necesita el body crudo (bytes exactos) para verificar la firma
+// con stripe.webhooks.constructEvent — por eso se excluye del parser JSON global y usa
+// su propio middleware express.raw() más abajo, en la propia ruta.
+app.use((req: Request, res: Response, next) => {
+  if (req.originalUrl === '/api/webhooks/stripe') {
+    next();
+  } else {
+    express.json({ limit: '50mb' })(req, res, next);
+  }
+});
 
 // Endpoint de verificación de salud
 app.get('/health', (req: Request, res: Response) => {
@@ -318,21 +332,10 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
       console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}).`);
     }
 
-    // 3. Generar Link de Pago en Conekta para el enganche
-    let checkoutUrl = '';
-    try {
-      checkoutUrl = await ConektaService.crearCheckoutEnganche(
-        cliente,
-        email,
-        celular,
-        req.body.modelo,
-        Number(req.body.enganche)
-      );
-    } catch (conektaError: any) {
-      console.error('[Conekta] No se pudo generar el link de pago:', conektaError.message);
-      // fallback temporal por si hay algún problema con la API Key en modo pruebas
-      checkoutUrl = 'https://pay.conekta.com/checkout/simulado-tests';
-    }
+    // 3. El link de pago real se genera después, en POST /:id/crear-orden-enganche
+    // (Stripe Checkout Session), una vez que el frontend confirma que el cliente
+    // quiere pagar. Este campo queda vacío a propósito — nunca lo consumió el frontend.
+    const checkoutUrl = '';
 
     // 3b. Subir INE/selfie al bucket privado (ya no se guarda el base64 en la fila)
     const [ineFrentePath, ineReversoPath, selfiePath] = await Promise.all([
@@ -403,8 +406,10 @@ app.post('/api/otp/verificar', async (req: Request, res: Response) => {
   }
 });
 
-// POST: Crea la Orden del enganche para pagarla con el Checkout Component embebido de
-// Conekta. La confirmación real del pago llega después por el webhook order.paid.
+// POST: Crea una Checkout Session de Stripe para el enganche (página hosteada por
+// Stripe). El frontend redirige al cliente a la `checkoutUrl` devuelta; el cliente
+// paga ahí y Stripe lo regresa solo a success_url. La confirmación real del pago
+// llega después por el webhook checkout.session.completed, no por este response.
 app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -414,26 +419,33 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const { orderId, checkoutId } = await ConektaService.crearOrdenEnganche(
+    const origin = (req.headers.origin as string) || ALLOWED_ORIGINS[0];
+    const successUrl = `${origin}/domicilio?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+    const cancelUrl = `${origin}/`;
+
+    const { sessionId, url } = await StripeService.crearCheckoutSession(
+      id,
       solicitud.cliente,
       solicitud.email,
       solicitud.celular,
       solicitud.modelo,
-      Number(solicitud.enganche)
+      Number(solicitud.enganche),
+      successUrl,
+      cancelUrl
     );
 
-    console.log(`[Conekta] Orden ${orderId} creada para la solicitud ${id}, esperando pago vía Checkout Component.`);
-    return res.status(200).json({ success: true, checkoutId });
+    console.log(`[Stripe] Checkout session ${sessionId} creada para la solicitud ${id}, esperando pago.`);
+    return res.status(200).json({ success: true, checkoutUrl: url });
   } catch (error: any) {
-    console.error('Error al crear la orden del enganche:', error.response?.data || error.message);
+    console.error('Error al crear el checkout de Stripe:', error.message);
     return res.status(500).json({ error: error.message || 'Ocurrió un error al iniciar el pago del enganche.' });
   }
 });
 
-// POST: Bypass TEMPORAL para marcar el enganche como pagado sin pasar por Conekta,
-// mientras la cuenta de Conekta siga sin validar (ver Trello MX-0058) y el checkout
-// no deje completar un pago real. Pensado solo para poder seguir probando el resto
-// del flujo (Skydropx/Domicilio) — quitar en cuanto Conekta apruebe la cuenta.
+// POST: Bypass TEMPORAL para marcar el enganche como pagado sin pasar por el
+// procesador de pagos — pensado solo para poder seguir probando el resto del flujo
+// (Skydropx/Domicilio) sin cobrar una tarjeta real. Quitar antes de ir a producción
+// definitiva (ver Trello MX-0061).
 app.post('/api/solicitudes/:id/aprobar-pago-manual', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -446,7 +458,7 @@ app.post('/api/solicitudes/:id/aprobar-pago-manual', async (req: Request, res: R
     const identificador = solicitud.email || solicitud.celular;
     await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
 
-    console.warn(`[BYPASS MANUAL] Enganche de la solicitud ${id} (${identificador}) marcado como pagado SIN pasar por Conekta.`);
+    console.warn(`[BYPASS MANUAL] Enganche de la solicitud ${id} (${identificador}) marcado como pagado SIN pasar por el procesador de pagos.`);
     return res.status(200).json({ success: true });
   } catch (error: any) {
     console.error('Error en aprobar-pago-manual:', error.message);
@@ -769,6 +781,151 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
   }
 });
 
+// POST: Endpoint seguro para recibir webhooks de Stripe (pagos) — fuente de verdad del
+// pago del enganche, igual que /api/webhooks/conekta antes. Usa express.raw() en vez
+// del JSON parser global (ver arriba) porque Stripe firma sobre los bytes exactos del
+// body; stripe.webhooks.constructEvent rechaza la petición si la firma no cuadra.
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req: Request, res: Response) => {
+  const signature = req.headers['stripe-signature'] as string;
+
+  let event;
+  try {
+    if (!STRIPE_WEBHOOK_SECRET) {
+      throw new Error('STRIPE_WEBHOOK_SECRET no está configurado en el servidor.');
+    }
+    event = StripeService.construirEventoWebhook(req.body as Buffer, signature, STRIPE_WEBHOOK_SECRET);
+  } catch (err: any) {
+    console.warn('[Stripe Webhook] Firma inválida o no verificable:', err.message);
+    return res.status(401).json({ error: 'Firma de webhook inválida' });
+  }
+
+  console.log('[Stripe Webhook] Evento recibido y verificado:', event.type);
+
+  try {
+    // Tarjeta cobra síncrono: checkout.session.completed ya trae payment_status "paid".
+    // OXXO/SPEI son de cobro diferido (el cliente paga horas/días después con el
+    // voucher o la CLABE) — en ese caso completed llega con payment_status "unpaid" y
+    // la confirmación real llega más tarde en checkout.session.async_payment_succeeded.
+    // Ambos eventos comparten la misma Session como payload, así que se procesan igual.
+    if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
+      const session = event.data.object as any;
+
+      if (session.payment_status !== 'paid') {
+        console.log(`[Stripe Webhook] Sesión ${session.id} todavía no está pagada (payment_status: ${session.payment_status}) — esperando confirmación (OXXO/SPEI).`);
+        return res.status(200).json({ received: true });
+      }
+
+      const solicitudId: string | undefined = session.metadata?.solicitud_id;
+      const customerId: string | undefined = session.customer;
+      const paymentIntentId: string | undefined = session.payment_intent;
+
+      console.log(`[Stripe Webhook] Sesión pagada con éxito: ${session.id}. Solicitud: ${solicitudId}.`);
+
+      if (!solicitudId) {
+        console.warn('[Stripe Webhook] La sesión no trae solicitud_id en metadata — no se puede confirmar el pago.');
+        return res.status(200).json({ received: true });
+      }
+
+      const solicitud = await PersistenceService.getSolicitudById(solicitudId);
+      if (!solicitud) {
+        console.warn(`[Stripe Webhook] No se encontró la solicitud ${solicitudId}.`);
+        return res.status(200).json({ received: true });
+      }
+
+      const identificador = solicitud.email || solicitud.celular;
+      await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
+      console.log(`[Stripe Webhook] Pago confirmado para la solicitud ${solicitudId}.`);
+
+      // Arma el cobro semanal automático a partir de cómo se pagó el enganche. Con
+      // tarjeta: Subscription clásica cobrando la tarjeta guardada. Sin tarjeta
+      // (OXXO/SPEI, que no se pueden dejar guardados): CLABE persistente + Subscription
+      // "send_invoice" que se cobra sola del saldo cuando el cliente deposita — el
+      // cliente recibe esa CLABE una vez por WhatsApp y la reutiliza todas las semanas,
+      // sin links nuevos (decisión de negocio, reunión 07/08).
+      if (customerId && paymentIntentId) {
+        try {
+          const { paymentMethodId, tipo } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId);
+          await PersistenceService.guardarMetodoPagoEnganche(solicitud.id, tipo);
+
+          if (tipo !== 'card') {
+            const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId);
+            const { subscriptionId } = await StripeService.crearSuscripcionConSaldo(
+              solicitud.id,
+              customerId,
+              Number(solicitud.pago_semanal),
+              Number(solicitud.semanas)
+            );
+            await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
+            await PersistenceService.guardarReferenciaPagoPersistente(solicitud.id, clabe);
+            await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+            try {
+              await WhatsappOtpService.enviarRecordatorioPagoSemanal(
+                solicitud.celular,
+                solicitud.cliente,
+                clabe,
+                Number(solicitud.pago_semanal),
+                1
+              );
+            } catch (whatsappError: any) {
+              console.error(`[Stripe Webhook] No se pudo avisar la CLABE por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+            }
+
+            console.log(
+              `[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con "${tipo}" (no tarjeta) — ` +
+              `CLABE persistente ${clabe} asignada, suscripción ${subscriptionId} armada (send_invoice).`
+            );
+          } else {
+            await StripeService.fijarMetodoPagoDefault(customerId, paymentMethodId);
+
+            const { subscriptionId } = await StripeService.crearSuscripcionSemanal(
+              solicitud.id,
+              customerId,
+              paymentMethodId,
+              Number(solicitud.pago_semanal),
+              Number(solicitud.semanas)
+            );
+            await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
+            console.log(`[Stripe Webhook] Suscripción semanal ${subscriptionId} creada para la solicitud ${solicitud.id}.`);
+          }
+        } catch (subError: any) {
+          console.error(
+            `[Stripe Webhook] No se pudo armar el cobro semanal (automático o manual) de la solicitud ${solicitud.id}: ${subError.message}. ` +
+            `El enganche ya quedó cobrado y confirmado igual.`
+          );
+        }
+      } else {
+        console.warn(`[Stripe Webhook] La sesión ${session.id} no trajo customer/payment_intent — no se puede armar el cobro semanal.`);
+      }
+    } else if (event.type === 'checkout.session.async_payment_failed') {
+      const session = event.data.object as any;
+      const tipoPago = session.metadata?.tipo || 'enganche';
+      console.warn(`[Stripe Webhook] El pago diferido (OXXO/SPEI) de la sesión ${session.id} (solicitud ${session.metadata?.solicitud_id}, tipo "${tipoPago}") falló o expiró — el cliente tendrá que pagar de nuevo.`);
+    } else if (event.type === 'invoice.paid') {
+      // Factura semanal de una Subscription "send_invoice" (cobro semanal manual por
+      // CLABE persistente, ver arriba) que Stripe acaba de pagar sola con el saldo que
+      // el cliente depositó. `metadata` es el snapshot de los metadata de la
+      // Subscription al momento de facturar, incluye el solicitud_id que le pusimos en
+      // crearSuscripcionConSaldo.
+      const invoice = event.data.object as any;
+      const solicitudId: string | undefined = invoice.parent?.subscription_details?.metadata?.solicitud_id;
+
+      if (!solicitudId) {
+        console.log(`[Stripe Webhook] Invoice ${invoice.id} pagada, pero no trae solicitud_id (no es de una suscripción por saldo nuestra) — se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
+      const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId);
+      console.log(`[Stripe Webhook] Pago semanal (CLABE) confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (webhookError: any) {
+    console.error('[Stripe Webhook] Error al procesar webhook:', webhookError.message);
+    return res.status(500).json({ error: 'Error procesando webhook' });
+  }
+});
+
 // POST: Enviar comando de bloqueo/desbloqueo a dispositivo (MDM) firmado criptográficamente con JWT
 app.post('/api/mdm/command', (req: Request, res: Response) => {
   const { deviceId, action } = req.body;
@@ -811,6 +968,30 @@ app.post('/api/webhooks/verificacion-cliente', async (req: Request, res: Respons
     return res.status(500).json({ error: 'Error al conectar con el servidor de verificación.' });
   }
 });
+
+// POST: Dispara a mano el envío de links de pago semanal pendientes (OXXO/SPEI) — la
+// misma lógica que corre sola todos los días por cron, expuesta para poder probarla
+// sin esperar al horario programado.
+app.post('/api/admin/cobros-semanales/procesar', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const resultado = await CobrosSemanalesService.procesarPendientes();
+    return res.status(200).json({ success: true, ...resultado });
+  } catch (error: any) {
+    console.error('Error al procesar cobros semanales:', error.message);
+    return res.status(500).json({ error: error.message || 'No se pudieron procesar los cobros semanales.' });
+  }
+});
+
+// Cron diario (9am hora de Ciudad de México) que manda los links de pago semanal
+// pendientes por WhatsApp a quienes pagaron el enganche con OXXO/SPEI — ver
+// cobrosSemanalesService.ts. Corre en el mismo proceso porque Railway mantiene este
+// servidor Express siempre corriendo (no es una función serverless).
+cron.schedule('0 9 * * *', () => {
+  console.log('[Cron] Procesando cobros semanales pendientes...');
+  CobrosSemanalesService.procesarPendientes().catch((error) => {
+    console.error('[Cron] Error al procesar cobros semanales:', error.message);
+  });
+}, { timezone: 'America/Mexico_City' });
 
 // Iniciar servidor
 app.listen(PORT, () => {
