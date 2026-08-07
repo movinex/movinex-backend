@@ -17,6 +17,18 @@ export class WhatsappOtpService {
   }
 
   /**
+   * Arma el número en el formato que espera la API de WhatsApp (código de país +
+   * número, sin signos). Los clientes reales son mexicanos y solo cargan su celular
+   * de 10 dígitos sin código de país, así que ese caso sigue asumiendo México (+52).
+   * Si el número ya trae más de 10 dígitos, se asume que el código de país ya viene
+   * incluido (ej. pruebas desde otros países) y se manda tal cual.
+   */
+  private static formatearNumero(celular: string): string {
+    const soloDigitos = celular.replace(/\D/g, '');
+    return soloDigitos.length === 10 ? `52${soloDigitos}` : soloDigitos;
+  }
+
+  /**
    * Envía un código OTP de 6 dígitos por WhatsApp usando una plantilla de tipo
    * Authentication ya aprobada por Meta. Requiere WHATSAPP_ACCESS_TOKEN +
    * WHATSAPP_PHONE_NUMBER_ID configurados y la plantilla (WHATSAPP_OTP_TEMPLATE_NAME)
@@ -39,7 +51,7 @@ export class WhatsappOtpService {
         `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: 'whatsapp',
-          to: celular.startsWith('52') ? celular : `52${celular}`,
+          to: this.formatearNumero(celular),
           type: 'template',
           template: {
             name: this.TEMPLATE_NAME,
@@ -91,7 +103,7 @@ export class WhatsappOtpService {
         `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: 'whatsapp',
-          to: celular.startsWith('52') ? celular : `52${celular}`,
+          to: this.formatearNumero(celular),
           type: 'template',
           template: {
             name: this.COBRO_TEMPLATE_NAME,

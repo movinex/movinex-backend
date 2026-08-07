@@ -374,8 +374,11 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
 app.post('/api/otp/enviar', async (req: Request, res: Response) => {
   try {
     const { celular } = req.body;
-    if (!celular || String(celular).replace(/\D/g, '').length !== 10) {
-      return res.status(400).json({ error: 'Se requiere un celular válido de 10 dígitos.' });
+    const digitos = celular ? String(celular).replace(/\D/g, '') : '';
+    // 10 dígitos: celular mexicano sin código de país (el caso real de un cliente).
+    // 11-15: número con código de país incluido (ej. pruebas desde otros países).
+    if (digitos.length < 10 || digitos.length > 15) {
+      return res.status(400).json({ error: 'Se requiere un celular válido.' });
     }
 
     const { mock } = await WhatsappOtpService.enviarCodigo(celular);
