@@ -882,6 +882,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
               console.error(`[Stripe Webhook] No se pudo avisar la CLABE por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
             }
 
+            // El pago con OXXO/SPEI se confirma horas o días después de que el cliente
+            // salió del navegador (a diferencia de tarjeta, que Stripe redirige solo vía
+            // success_url) — sin este aviso, nadie le dice que ya puede volver a cargar
+            // su domicilio. Mismo link que usa crear-orden-enganche para success_url.
+            try {
+              const linkContinuar = `${ALLOWED_ORIGINS[0]}/domicilio?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+            } catch (whatsappError: any) {
+              console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+            }
+
             console.log(
               `[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con "${tipo}" (no tarjeta) — ` +
               `CLABE persistente ${clabe} asignada, suscripción ${subscriptionId} armada (send_invoice).`

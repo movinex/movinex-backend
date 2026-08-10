@@ -9,6 +9,7 @@ export class WhatsappOtpService {
   private static PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
   private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
+  private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
   private static GRAPH_URL = 'https://graph.facebook.com/v20.0';
 
@@ -133,6 +134,58 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp Cobro Semanal] Error al enviar el recordatorio:', error.response?.data || error.message);
       throw new Error('No se pudo enviar el recordatorio de pago semanal por WhatsApp.');
+    }
+  }
+
+  /**
+   * Avisa que el enganche pagado con OXXO/SPEI ya se confirmó, con un link para que el
+   * cliente vuelva a completar su domicilio de envío. A diferencia de tarjeta (donde
+   * Stripe lo redirige solo de vuelta al navegador vía success_url), el pago con
+   * OXXO/SPEI se confirma horas o días después (webhook async_payment_succeeded) y el
+   * cliente ya no está frente a la pantalla — sin este mensaje no se entera de que
+   * puede continuar. El link va como texto plano, no como botón de URL dinámica: el
+   * botón de WhatsApp solo admite variar un sufijo fijo sobre un dominio fijo, y este
+   * link lleva una query string completa (?solicitud=X&modelo=Y).
+   */
+  static async enviarConfirmacionPago(celular: string, cliente: string, link: string): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Pago Confirmado MOCK] ${celular} (${cliente}) — link para continuar: ${link}`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: this.PAGO_CONFIRMADO_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: link }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Pago Confirmado] Confirmación de pago enviada a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Pago Confirmado] Error al enviar la confirmación:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar la confirmación de pago por WhatsApp.');
     }
   }
 
