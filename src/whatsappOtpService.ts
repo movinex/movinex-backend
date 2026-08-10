@@ -10,6 +10,7 @@ export class WhatsappOtpService {
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
   private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
+  private static ENVIADO_TEMPLATE_NAME = process.env.WHATSAPP_ENVIADO_TEMPLATE_NAME || 'movinex_pedido_enviado';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
   private static GRAPH_URL = 'https://graph.facebook.com/v20.0';
 
@@ -186,6 +187,53 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp Pago Confirmado] Error al enviar la confirmación:', error.response?.data || error.message);
       throw new Error('No se pudo enviar la confirmación de pago por WhatsApp.');
+    }
+  }
+
+  /**
+   * Mensaje de cierre de ciclo: se manda cuando el admin marca la solicitud como
+   * "Enviado" (paquete ya en manos de la paquetería) — avisa al cliente que su equipo
+   * va en camino. Pedido de un compañero del equipo (vía WhatsApp interno, 10/08).
+   */
+  static async enviarPedidoEnviado(celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Pedido Enviado MOCK] ${celular} (${cliente}) — ${modelo} en camino.`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: this.ENVIADO_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: modelo }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Pedido Enviado] Aviso de envío mandado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Pedido Enviado] Error al enviar el aviso:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar el aviso de envío por WhatsApp.');
     }
   }
 

@@ -123,7 +123,10 @@ export class SkydropxService {
         country_code: 'MX',
         phone: telefonoLimpio.startsWith('52') ? telefonoLimpio : `52${telefonoLimpio}`,
         email,
-        reference: `Celular Movinex ${modelo}`
+        // No revelar el modelo del celular en la guía — es un dato visible para
+        // cualquiera que maneje el paquete en tránsito, y lo hace un blanco más
+        // fácil de robo. Referencia genérica, sin pistas de qué hay adentro.
+        reference: 'Paquete Movinex'
       };
 
       const auth = await this.authHeaders(usarProduccion);

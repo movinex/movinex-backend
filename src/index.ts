@@ -639,6 +639,15 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
     }
 
     const solicitudActualizada = await PersistenceService.updateEstatus(id, estatus);
+
+    if (estatus === 'Enviado') {
+      try {
+        await WhatsappOtpService.enviarPedidoEnviado(solicitudActualizada.celular, solicitudActualizada.cliente, solicitudActualizada.modelo);
+      } catch (whatsappError: any) {
+        console.error(`[Estatus] No se pudo avisar por WhatsApp que la solicitud ${id} fue enviada: ${whatsappError.message}`);
+      }
+    }
+
     return res.status(200).json(solicitudActualizada);
   } catch (error: any) {
     console.error('Error actualizando estatus:', error);
