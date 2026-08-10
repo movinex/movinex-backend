@@ -868,19 +868,13 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
             await PersistenceService.guardarReferenciaPagoPersistente(solicitud.id, clabe);
+            // No se manda el aviso de la CLABE acá mismo: el primer pago real recién vence
+            // en 7 días (fin del trial), así que este mismo programarProximoCobroSemanal ya
+            // deja el primer recordatorio real armado para ese día — lo manda el cron
+            // (cobrosSemanalesService.ts), no este webhook. Mandarlo apenas se confirma el
+            // enganche sonaba a "ya te toca pagar" cuando en realidad todavía falta una
+            // semana entera.
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
-
-            try {
-              await WhatsappOtpService.enviarRecordatorioPagoSemanal(
-                solicitud.celular,
-                solicitud.cliente,
-                clabe,
-                Number(solicitud.pago_semanal),
-                1
-              );
-            } catch (whatsappError: any) {
-              console.error(`[Stripe Webhook] No se pudo avisar la CLABE por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
-            }
 
             // El pago con OXXO/SPEI se confirma horas o días después de que el cliente
             // salió del navegador (a diferencia de tarjeta, que Stripe redirige solo vía
