@@ -54,6 +54,20 @@ export class PersistenceService {
     return data.signedUrl;
   }
 
+  // Baja un documento KYC ya guardado y lo devuelve como data URL base64 — hace falta
+  // para volver a correr el biométrico cuando el frente del INE y la selfie se
+  // guardaron en llamadas separadas (guardado progresivo, ver PATCH /:id/progreso en
+  // index.ts): Verificamex necesita las dos imágenes juntas, pero solo el path queda
+  // guardado en la fila, no el base64 original.
+  static async descargarDocumentoKYC(path: string): Promise<string> {
+    const { data, error } = await supabase.storage.from('documentos-kyc').download(path);
+    if (error || !data) throw error || new Error(`No se pudo descargar el documento KYC ${path}.`);
+
+    const buffer = Buffer.from(await data.arrayBuffer());
+    const mimeType = data.type || 'image/jpeg';
+    return `data:${mimeType};base64,${buffer.toString('base64')}`;
+  }
+
   static async saveSolicitud(datos: any) {
     const { data, error } = await supabase
       .from('solicitudes')
@@ -79,6 +93,71 @@ export class PersistenceService {
           costo_envio: Number(datos.costoEnvio || 0)
         }
       ])
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Se crea apenas se verifica el OTP (antes de pedir email/INE/selfie), para no
+  // perder el lead si el cliente se cae del formulario a mitad de camino — el resto
+  // de los campos se van completando después vía guardarProgresoSolicitud/
+  // finalizarSolicitud, sobre esta misma fila (no se vuelve a insertar).
+  static async crearSolicitudIniciada(datos: {
+    celular: string;
+    modelo: string;
+    enganche: number;
+    semanas: number;
+    pago_semanal: number;
+    costo_envio?: number;
+  }) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .insert([
+        {
+          cliente: 'Pendiente de verificación',
+          celular: datos.celular,
+          email: null,
+          modelo: datos.modelo,
+          enganche: Number(datos.enganche),
+          semanas: Number(datos.semanas),
+          pago_semanal: Number(datos.pago_semanal),
+          costo_envio: Number(datos.costo_envio || 0),
+          estatus: 'Iniciada'
+        }
+      ])
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Guarda lo que el cliente va completando (email, y/o una o más fotos ya subidas al
+  // bucket privado) apenas está listo cada campo — no espera al submit final. Solo
+  // actualiza las claves presentes en `campos`.
+  static async guardarProgresoSolicitud(id: string, campos: Partial<{ email: string; ine_frente: string; ine_reverso: string; selfie: string; cliente: string; curp: string | null; ocr_ok: boolean; biometrico_ok: boolean }>) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update(campos)
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Cierra el ciclo: corre después de Verificamex (POST /:id/finalizar en index.ts),
+  // con el nombre/CURP leídos por OCR y el estatus ya decidido.
+  static async finalizarSolicitud(id: string, datos: { cliente: string; curp: string | null; estatus: string; acepta_terminos: boolean }) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({
+        cliente: datos.cliente,
+        curp: datos.curp,
+        estatus: datos.estatus,
+        acepta_terminos: datos.acepta_terminos
+      })
+      .eq('id', id)
       .select();
 
     if (error) throw error;

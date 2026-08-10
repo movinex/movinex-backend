@@ -379,6 +379,169 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
   }
 });
 
+// POST: Crea la solicitud apenas se verifica el OTP (antes de pedir email/INE/selfie),
+// para no perder el lead si el cliente se cae del formulario a mitad de camino. El resto
+// de los campos se completan después sobre esta misma fila vía PATCH /:id/progreso y
+// POST /:id/finalizar — no se vuelve a insertar.
+app.post('/api/solicitudes/iniciar', async (req: Request, res: Response) => {
+  try {
+    const { celular, modelo, enganche, semanas, pago_semanal, costoEnvio } = req.body;
+
+    const otpVerificado = await PersistenceService.getOtpVerificado(celular);
+    if (!otpVerificado) {
+      return res.status(400).json({ error: 'Verifica tu número de WhatsApp antes de continuar.' });
+    }
+
+    const solicitud = await PersistenceService.crearSolicitudIniciada({
+      celular,
+      modelo,
+      enganche,
+      semanas,
+      pago_semanal,
+      costo_envio: costoEnvio
+    });
+
+    console.log(`[Backend] Solicitud ${solicitud.id} iniciada (OTP verificado) para ${celular}, modelo ${modelo}.`);
+    return res.status(201).json({ success: true, solicitud });
+  } catch (error: any) {
+    console.error('Error al iniciar la solicitud:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo iniciar la solicitud.' });
+  }
+});
+
+// GET: Resumen público para reanudar una solicitud desde el link de la URL
+// (?solicitud=X) si el cliente refresca o vuelve más tarde — mismo modelo de confianza
+// que /domicilio: el UUID en la URL es la credencial. No devuelve las imágenes en sí,
+// solo si ya están cargadas.
+app.get('/api/solicitudes/:id/resumen', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    return res.status(200).json({
+      id: solicitud.id,
+      celular: solicitud.celular,
+      email: solicitud.email,
+      modelo: solicitud.modelo,
+      enganche: solicitud.enganche,
+      semanas: solicitud.semanas,
+      pagoSemanal: solicitud.pago_semanal,
+      costoEnvio: solicitud.costo_envio,
+      estatus: solicitud.estatus,
+      tieneIneFrente: Boolean(solicitud.ine_frente),
+      tieneIneReverso: Boolean(solicitud.ine_reverso),
+      tieneSelfie: Boolean(solicitud.selfie)
+    });
+  } catch (error: any) {
+    console.error('Error al obtener el resumen de la solicitud:', error);
+    return res.status(500).json({ error: 'No se pudo obtener la solicitud.' });
+  }
+});
+
+// PATCH: Guarda cada campo (email y/o fotos) apenas el cliente lo completa, sin esperar
+// al submit final — así no se pierde nada si se cae del formulario a mitad de camino.
+// El biométrico corre acá mismo en cuanto quedan disponibles frente + selfie (juntos en
+// el mismo request, o uno ya guardado de una llamada anterior — en ese caso se
+// descarga del bucket para volver a compararlo, porque el base64 original no se guarda).
+app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { email, ine_frente, ine_reverso, selfie } = req.body;
+
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    const emailActual = email !== undefined ? email : solicitud.email;
+    const campos: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
+
+    if (email !== undefined) {
+      campos.email = email;
+    }
+
+    if (ine_frente) {
+      campos.ine_frente = await PersistenceService.subirDocumentoKYC(ine_frente, 'ine_frente');
+
+      const datosIne = await VerificamexService.leerDatosINE(ine_frente, emailActual);
+      if (datosIne.nombre) campos.cliente = datosIne.nombre;
+      campos.curp = datosIne.curp;
+      // En modo mock (sin email "real") no se exige — ver el mismo criterio en /finalizar.
+      campos.ocr_ok = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
+    }
+
+    if (ine_reverso) {
+      campos.ine_reverso = await PersistenceService.subirDocumentoKYC(ine_reverso, 'ine_reverso');
+    }
+
+    if (selfie) {
+      campos.selfie = await PersistenceService.subirDocumentoKYC(selfie, 'selfie');
+    }
+
+    if (ine_frente || selfie) {
+      const frenteB64 = ine_frente || (solicitud.ine_frente ? await PersistenceService.descargarDocumentoKYC(solicitud.ine_frente) : null);
+      const selfieB64 = selfie || (solicitud.selfie ? await PersistenceService.descargarDocumentoKYC(solicitud.selfie) : null);
+      if (frenteB64 && selfieB64) {
+        const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, emailActual);
+        campos.biometrico_ok = biometricResult.valido;
+      }
+    }
+
+    const solicitudActualizada = await PersistenceService.guardarProgresoSolicitud(id, campos);
+    return res.status(200).json({ success: true, solicitud: solicitudActualizada });
+  } catch (error: any) {
+    console.error('Error al guardar el progreso de la solicitud:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo guardar el progreso.' });
+  }
+});
+
+// POST: Cierra el ciclo de la solicitud — sin body, todo lo demás ya se guardó
+// progresivamente vía /progreso. Decide el estatus final con lo que ya quedó
+// registrado (ocr_ok/biometrico_ok, null = ese paso nunca se completó, tratado como
+// válido igual que hoy cuando faltan fotos).
+app.post('/api/solicitudes/:id/finalizar', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { aceptaTerminos } = req.body;
+
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    const kycResult = await VerificamexService.validarTelefono(solicitud.celular);
+    const biometricoOk = solicitud.biometrico_ok !== false;
+    const ocrOk = solicitud.ocr_ok !== false;
+    const esSolicitudValida = kycResult.valido && biometricoOk && ocrOk;
+    const estatusFinal = esSolicitudValida ? 'Aprobado' : 'Pendiente';
+
+    if (!esSolicitudValida) {
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${solicitud.cliente} con teléfono ${solicitud.celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricoOk ? 'OK' : 'RECHAZADO'}, Lectura INE: ${ocrOk ? 'OK' : 'INCOMPLETA/ILEGIBLE'}).`);
+    }
+
+    const solicitudFinal = await PersistenceService.finalizarSolicitud(id, {
+      cliente: solicitud.cliente,
+      curp: solicitud.curp,
+      estatus: estatusFinal,
+      acepta_terminos: Boolean(aceptaTerminos)
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: esSolicitudValida
+        ? 'Solicitud de crédito aprobada y registrada con éxito.'
+        : 'Solicitud registrada. Requiere verificación adicional.',
+      solicitud: solicitudFinal
+    });
+  } catch (error: any) {
+    console.error('Error al finalizar la solicitud:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo finalizar la solicitud.' });
+  }
+});
+
 // POST: Enviar código OTP por WhatsApp (paso previo al pago del enganche)
 app.post('/api/otp/enviar', async (req: Request, res: Response) => {
   try {
