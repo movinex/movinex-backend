@@ -232,22 +232,37 @@ export class PersistenceService {
     return (data || []).filter((s: any) => Number(s.semanas_pagadas || 0) < Number(s.semanas));
   }
 
-  // Confirma un cobro semanal manual ya pagado (webhook invoice.paid, cobro por saldo
-  // vía la CLABE persistente) e incrementa el contador de semanas pagadas.
-  static async registrarPagoSemanalManual(id: string): Promise<{ semanas_pagadas: number; semanas: number }> {
+  // Confirma un pago semanal ya cobrado por Stripe (webhook invoice.paid — aplica tanto
+  // a la Subscription de tarjeta como a la de saldo/CLABE, las dos llevan el mismo
+  // metadata.solicitud_id) e incrementa el contador de semanas pagadas.
+  //
+  // Deduplicado por invoice.id: Stripe garantiza entrega "al menos una vez" de sus
+  // webhooks, así que el mismo invoice.paid puede llegar más de una vez. Sin este
+  // chequeo, un reintento contaría la misma semana dos veces y podría disparar la
+  // cancelación de la Subscription antes de tiempo, cortando semanas que el cliente
+  // todavía debe — ver el cancelarSuscripcion en el webhook de index.ts.
+  static async registrarPagoSemanalManual(id: string, invoiceId: string): Promise<{ semanas_pagadas: number; semanas: number; yaProcesada: boolean }> {
     const solicitud = await this.getSolicitudById(id);
     if (!solicitud) throw new Error(`Solicitud ${id} no encontrada.`);
+
+    if (solicitud.ultima_invoice_pagada === invoiceId) {
+      return {
+        semanas_pagadas: Number(solicitud.semanas_pagadas || 0),
+        semanas: Number(solicitud.semanas),
+        yaProcesada: true
+      };
+    }
 
     const semanasPagadas = Number(solicitud.semanas_pagadas || 0) + 1;
 
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ semanas_pagadas: semanasPagadas })
+      .update({ semanas_pagadas: semanasPagadas, ultima_invoice_pagada: invoiceId })
       .eq('id', id)
       .select();
 
     if (error) throw error;
-    return { semanas_pagadas: semanasPagadas, semanas: Number(data[0].semanas) };
+    return { semanas_pagadas: semanasPagadas, semanas: Number(data[0].semanas), yaProcesada: false };
   }
 
   // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el

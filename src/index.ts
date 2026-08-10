@@ -925,21 +925,43 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       const tipoPago = session.metadata?.tipo || 'enganche';
       console.warn(`[Stripe Webhook] El pago diferido (OXXO/SPEI) de la sesión ${session.id} (solicitud ${session.metadata?.solicitud_id}, tipo "${tipoPago}") falló o expiró — el cliente tendrá que pagar de nuevo.`);
     } else if (event.type === 'invoice.paid') {
-      // Factura semanal de una Subscription "send_invoice" (cobro semanal manual por
-      // CLABE persistente, ver arriba) que Stripe acaba de pagar sola con el saldo que
-      // el cliente depositó. `metadata` es el snapshot de los metadata de la
-      // Subscription al momento de facturar, incluye el solicitud_id que le pusimos en
-      // crearSuscripcionConSaldo.
+      // Factura semanal pagada — de CUALQUIERA de las dos Subscriptions (tarjeta,
+      // cobro automático; o "send_invoice" por saldo/CLABE persistente): las dos se
+      // crean con el mismo metadata.solicitud_id (ver crearSuscripcionSemanal y
+      // crearSuscripcionConSaldo), y `invoice.parent.subscription_details.metadata`
+      // es el snapshot de esos metadata al momento de facturar.
       const invoice = event.data.object as any;
       const solicitudId: string | undefined = invoice.parent?.subscription_details?.metadata?.solicitud_id;
 
       if (!solicitudId) {
-        console.log(`[Stripe Webhook] Invoice ${invoice.id} pagada, pero no trae solicitud_id (no es de una suscripción por saldo nuestra) — se ignora.`);
+        console.log(`[Stripe Webhook] Invoice ${invoice.id} pagada, pero no trae solicitud_id (no es de una suscripción nuestra) — se ignora.`);
         return res.status(200).json({ received: true });
       }
 
-      const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId);
-      console.log(`[Stripe Webhook] Pago semanal (CLABE) confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+      const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId, invoice.id);
+      if (resultado.yaProcesada) {
+        console.log(`[Stripe Webhook] Invoice ${invoice.id} ya se había procesado antes para la solicitud ${solicitudId} — reintento del webhook, se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
+      console.log(`[Stripe Webhook] Pago semanal confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+
+      // Plan completo: cancelar la Subscription para que Stripe deje de cobrar — no
+      // trae `cancel_at` propio, así que sin esto seguiría facturando cada semana
+      // indefinidamente.
+      if (resultado.semanas_pagadas >= resultado.semanas) {
+        try {
+          const solicitudCompleta = await PersistenceService.getSolicitudById(solicitudId);
+          if (solicitudCompleta?.stripe_subscription_id) {
+            await StripeService.cancelarSuscripcion(solicitudCompleta.stripe_subscription_id, usarProduccion);
+            console.log(`[Stripe Webhook] Plan completo (${resultado.semanas_pagadas}/${resultado.semanas}) — Subscription ${solicitudCompleta.stripe_subscription_id} cancelada para la solicitud ${solicitudId}.`);
+          } else {
+            console.warn(`[Stripe Webhook] Plan completo para la solicitud ${solicitudId} pero no hay stripe_subscription_id guardado — no se pudo cancelar.`);
+          }
+        } catch (cancelError: any) {
+          console.error(`[Stripe Webhook] No se pudo cancelar la Subscription de la solicitud ${solicitudId} tras completar el plan: ${cancelError.message}`);
+        }
+      }
     }
 
     return res.status(200).json({ received: true });

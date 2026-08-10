@@ -264,6 +264,19 @@ export class StripeService {
   }
 
   /**
+   * Cancela la Subscription semanal (tarjeta o saldo/CLABE, da igual — ambas se
+   * cancelan igual) una vez que el cliente terminó de pagar su plan (26 o 52
+   * semanas). Sin esto, Stripe seguiría cobrando cada semana indefinidamente:
+   * ninguna de las dos Subscriptions se crea con `cancel_at` ni tope de ciclos.
+   * Cancelación inmediata (no `cancel_at_period_end`): se llama justo después de
+   * confirmarse el pago de la última semana, así que no queda nada pendiente de
+   * cobrar ni de prorratear.
+   */
+  static async cancelarSuscripcion(subscriptionId: string, usarProduccion: boolean): Promise<void> {
+    await this.getClient(usarProduccion).subscriptions.cancel(subscriptionId);
+  }
+
+  /**
    * Verifica la firma del webhook contra el signing secret del endpoint en Stripe.
    * Como el evento puede venir del endpoint live o del de prueba (dos secretos
    * distintos, ver `usaProduccion`), se prueban en orden hasta que uno verifique —
