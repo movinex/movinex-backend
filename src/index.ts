@@ -23,6 +23,7 @@ const app = express();
 const PORT = process.env.PORT || 10500;
 const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const STRIPE_WEBHOOK_SECRET_TEST = process.env.STRIPE_WEBHOOK_SECRET_TEST || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
 // Indicar a Express que confíe en los proxies (necesario en Railway / Heroku para rateLimit)
@@ -793,16 +794,19 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
   let event;
   try {
-    if (!STRIPE_WEBHOOK_SECRET) {
-      throw new Error('STRIPE_WEBHOOK_SECRET no está configurado en el servidor.');
+    if (!STRIPE_WEBHOOK_SECRET && !STRIPE_WEBHOOK_SECRET_TEST) {
+      throw new Error('STRIPE_WEBHOOK_SECRET / STRIPE_WEBHOOK_SECRET_TEST no están configurados en el servidor.');
     }
-    event = StripeService.construirEventoWebhook(req.body as Buffer, signature, STRIPE_WEBHOOK_SECRET);
+    event = StripeService.construirEventoWebhook(req.body as Buffer, signature, [STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_TEST]);
   } catch (err: any) {
     console.warn('[Stripe Webhook] Firma inválida o no verificable:', err.message);
     return res.status(401).json({ error: 'Firma de webhook inválida' });
   }
 
-  console.log('[Stripe Webhook] Evento recibido y verificado:', event.type);
+  // El evento trae livemode (true = cuenta real, false = modo de prueba) — se usa
+  // para llamar de vuelta a Stripe con el cliente correcto (ver StripeService.usaProduccion).
+  const usarProduccion = event.livemode;
+  console.log(`[Stripe Webhook] Evento recibido y verificado: ${event.type} (${usarProduccion ? 'LIVE' : 'test'})`);
 
   try {
     // Tarjeta cobra síncrono: checkout.session.completed ya trae payment_status "paid".
@@ -847,16 +851,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       // sin links nuevos (decisión de negocio, reunión 07/08).
       if (customerId && paymentIntentId) {
         try {
-          const { paymentMethodId, tipo } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId);
+          const { paymentMethodId, tipo } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
           await PersistenceService.guardarMetodoPagoEnganche(solicitud.id, tipo);
 
           if (tipo !== 'card') {
-            const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId);
+            const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId, usarProduccion);
             const { subscriptionId } = await StripeService.crearSuscripcionConSaldo(
               solicitud.id,
               customerId,
               Number(solicitud.pago_semanal),
-              Number(solicitud.semanas)
+              Number(solicitud.semanas),
+              usarProduccion
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
             await PersistenceService.guardarReferenciaPagoPersistente(solicitud.id, clabe);
@@ -879,14 +884,15 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
               `CLABE persistente ${clabe} asignada, suscripción ${subscriptionId} armada (send_invoice).`
             );
           } else {
-            await StripeService.fijarMetodoPagoDefault(customerId, paymentMethodId);
+            await StripeService.fijarMetodoPagoDefault(customerId, paymentMethodId, usarProduccion);
 
             const { subscriptionId } = await StripeService.crearSuscripcionSemanal(
               solicitud.id,
               customerId,
               paymentMethodId,
               Number(solicitud.pago_semanal),
-              Number(solicitud.semanas)
+              Number(solicitud.semanas),
+              usarProduccion
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
             console.log(`[Stripe Webhook] Suscripción semanal ${subscriptionId} creada para la solicitud ${solicitud.id}.`);
