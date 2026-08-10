@@ -50,9 +50,11 @@ export class VerificamexService {
 
   static async leerDatosINE(ineFrontBase64: string, emailCliente?: string): Promise<{ nombre: string | null; curp: string | null; rawData: any }> {
     try {
-      const esPruebaReal = emailCliente && emailCliente.toLowerCase().includes('real');
+      // Go-live (2026-08-10): producción por default, salvo el email exacto
+      // desarrollo@movinex.mx (equipo interno) — igual que Stripe y Skydropx.
+      const usarProduccion = emailCliente?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
 
-      if (!this.API_KEY || !esPruebaReal) {
+      if (!this.API_KEY || !usarProduccion) {
         console.log('[Verificamex MOCK] Omitiendo lectura OCR del INE (Simulado).');
         return { nombre: null, curp: null, rawData: { mock: true } };
       }
@@ -101,9 +103,9 @@ export class VerificamexService {
    */
   static async validarIdentidadBiometrica(ineFrontBase64: string, selfieBase64: string, emailCliente?: string): Promise<{ valido: boolean; score: number; rawData: any }> {
     try {
-      const esPruebaReal = emailCliente && emailCliente.toLowerCase().includes('real');
+      const usarProduccion = emailCliente?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
 
-      if (!this.API_KEY || !esPruebaReal) {
+      if (!this.API_KEY || !usarProduccion) {
         console.log(`[Verificamex MOCK] Aprobando biométrico localmente (Simulado).`);
         return {
           valido: true,

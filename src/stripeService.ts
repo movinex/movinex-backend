@@ -4,11 +4,14 @@ export class StripeService {
   private static _clientLive: Stripe | null = null;
   private static _clientTest: Stripe | null = null;
 
-  // Igual que Skydropx/Verificamex: por default se usan las llaves de PRUEBA
-  // (STRIPE_SECRET_KEY_TEST), y solo se pasa a las llaves LIVE (STRIPE_SECRET_KEY,
-  // que sí cobran de verdad) si el email de la solicitud contiene la palabra "real".
+  // Go-live (2026-08-10): por default se usan las llaves LIVE (cobran de verdad) —
+  // solo el email exacto desarrollo@movinex.mx (equipo interno, para seguir probando
+  // sin gastar) cae a las llaves de PRUEBA (STRIPE_SECRET_KEY_TEST). Antes era al
+  // revés (default prueba, "real" en el email pasaba a producción); se invirtió a
+  // propósito para que cualquier cliente real quede en modo real sin depender de que
+  // nadie escriba "real" en su email.
   static usaProduccion(email?: string | null): boolean {
-    return Boolean(email && email.toLowerCase().includes('real'));
+    return email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
   }
 
   private static getClient(usarProduccion: boolean): Stripe {

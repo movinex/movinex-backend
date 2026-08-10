@@ -81,9 +81,9 @@ export class SkydropxService {
   }
 
   /**
-   * Genera una guía real con Skydropx Pro (OAuth2). Igual que Verificamex: usa
-   * sandbox (sb-pro.skydropx.com) por default, y solo pasa a producción
-   * (SKYDROPX_PROD_*) si el email de la solicitud contiene la palabra "real".
+   * Genera una guía real con Skydropx Pro (OAuth2). Go-live (2026-08-10): por default
+   * usa producción (SKYDROPX_PROD_*) — solo el email exacto desarrollo@movinex.mx cae
+   * a sandbox (sb-pro.skydropx.com), igual que Stripe y Verificamex.
    * Flujo de 3 pasos, los dos primeros son asíncronos del lado de Skydropx:
    *   1. POST /quotations -> se espera a que is_completed sea true (poll).
    *   2. Se elige la tarifa más barata entre las que devolvieron success: true.
@@ -106,9 +106,7 @@ export class SkydropxService {
     modelo: string
   ): Promise<{ trackingNumber: string; labelUrl: string | null; simulado?: boolean; rawData?: any }> {
     try {
-      // Igual que Verificamex: solo se usa la API real de Skydropx si el email
-      // de la solicitud contiene la palabra "real"; si no, siempre sandbox.
-      const usarProduccion = Boolean(email && email.toLowerCase().includes('real'));
+      const usarProduccion = email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
       const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
 
       const telefonoLimpio = telefono.replace(/\D/g, '');
