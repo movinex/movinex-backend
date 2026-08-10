@@ -43,8 +43,11 @@ export class StripeService {
    * nivel de PaymentIntent): OXXO y SPEI son de un solo uso, un cliente no puede quedar
    * "guardado" para cobrarle automático con esos métodos, así que solo el pago con
    * tarjeta deja lista la suscripción semanal automática — ver la nota en el webhook.
-   * `customer_creation: 'always'` garantiza que `session.customer` siempre venga
-   * poblado (por default Stripe solo crea Customer en modo "payment" si hace falta).
+   * El método `customer_balance` (SPEI) exige un `customer` ya existente al crear la
+   * Session — a diferencia de `card`/`oxxo`, no alcanza con `customer_email` +
+   * `customer_creation: 'always'` (Stripe rechaza la Session entera con "The payment
+   * method `customer_balance` requires `customer` to be set"), así que el Customer se
+   * crea explícitamente acá antes de armar la sesión.
    *
    * La confirmación real llega después por webhook: `checkout.session.completed`
    * (tarjeta, síncrono) o `checkout.session.async_payment_succeeded` (OXXO/SPEI, el
@@ -61,13 +64,16 @@ export class StripeService {
     cancelUrl: string
   ): Promise<{ sessionId: string; url: string }> {
     const usarProduccion = this.usaProduccion(email);
+    const client = this.getClient(usarProduccion);
     const montoCentavos = Math.round(enganche * 100);
     const telefonoLimpio = telefono.replace(/\D/g, '');
     const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
 
     console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN (tarjeta/OXXO/SPEI, ${usarProduccion ? 'LIVE' : 'test'})`);
 
-    const session = await this.getClient(usarProduccion).checkout.sessions.create({
+    const customer = await client.customers.create({ email, name: cliente });
+
+    const session = await client.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card', 'oxxo', 'customer_balance'],
       payment_method_options: {
@@ -77,8 +83,7 @@ export class StripeService {
           bank_transfer: { type: 'mx_bank_transfer' },
         },
       },
-      customer_email: email,
-      customer_creation: 'always',
+      customer: customer.id,
       line_items: [
         {
           price_data: {
