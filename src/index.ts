@@ -938,6 +938,16 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
+      // Stripe genera y "paga" automáticamente una factura de $0 el día que arranca el
+      // trial de 7 días (billing_reason: "subscription_create", solo notifica que el
+      // período de prueba empezó) — esa NO es una semana real pagada, así que no cuenta.
+      // Sin este chequeo, esa factura de $0 se contaba como la semana #1 apenas se
+      // pagaba el enganche, días antes de que el cliente pagara nada de verdad.
+      if (Number(invoice.amount_paid) === 0) {
+        console.log(`[Stripe Webhook] Invoice ${invoice.id} de la solicitud ${solicitudId} es de $0 (billing_reason: ${invoice.billing_reason}) — no cuenta como semana pagada, se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
       const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId, invoice.id);
       if (resultado.yaProcesada) {
         console.log(`[Stripe Webhook] Invoice ${invoice.id} ya se había procesado antes para la solicitud ${solicitudId} — reintento del webhook, se ignora.`);
