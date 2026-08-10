@@ -318,19 +318,27 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     }
 
     // 1c. Leer nombre y CURP reales del frente del INE por OCR (Verificamex)
+    let ocrCompleto = true; // en modo mock (sin email "real") no exigimos OCR — ver abajo
     if (req.body.ine_frente) {
       const datosIne = await VerificamexService.leerDatosINE(req.body.ine_frente, email);
       if (datosIne.nombre) cliente = datosIne.nombre;
       curp = datosIne.curp;
+      // Si la llamada fue real (no simulada) y no devolvió nombre y CURP, la foto salió
+      // demasiado mala para leerla — no hay forma de confiar en la identidad del cliente,
+      // así que no se aprueba automático aunque el biométrico haya dado match.
+      if (!datosIne.rawData?.mock) {
+        ocrCompleto = Boolean(datosIne.nombre) && Boolean(datosIne.curp);
+      }
     }
 
-    // Si ambos son válidos, se aprueba de inmediato.
-    const esSolicitudValida = kycResult.valido && biometricResult.valido;
+    // Se aprueba de inmediato solo si el teléfono, el biométrico Y la lectura del INE
+    // salieron bien — cualquiera de los tres puede tumbar la aprobación automática.
+    const esSolicitudValida = kycResult.valido && biometricResult.valido && ocrCompleto;
     const estatusInicial = esSolicitudValida ? 'Aprobado' : 'Pendiente';
 
     // 2. Si no es autorizado, enviar alerta por email a desarrollo@movinex.mx (simulado por consola en backend)
     if (!esSolicitudValida) {
-      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}).`);
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricResult.valido ? 'OK' : 'RECHAZADO'}, Lectura INE: ${ocrCompleto ? 'OK' : 'INCOMPLETA/ILEGIBLE'}).`);
     }
 
     // 3. El link de pago real se genera después, en POST /:id/crear-orden-enganche
@@ -435,7 +443,8 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
       solicitud.modelo,
       Number(solicitud.enganche),
       successUrl,
-      cancelUrl
+      cancelUrl,
+      Number(solicitud.costo_envio || 0)
     );
 
     console.log(`[Stripe] Checkout session ${sessionId} creada para la solicitud ${id}, esperando pago.`);
@@ -530,7 +539,16 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const { trackingNumber, labelUrl, simulado } = await SkydropxService.crearEnvio(
+    // Responder ya con el domicilio guardado — la guía de Skydropx (cotizar → elegir
+    // tarifa → generar guía, con polling en cada paso) puede tardar varios segundos y no
+    // hace falta que el cliente la espere en esta pantalla. Se genera atrás, sin bloquear
+    // la respuesta; el admin la va a ver aparecer sola (guardarEnvio) apenas termine. El
+    // pequeño delay es solo para que la pantalla no pegue el salto de "guardando..." a
+    // "listo" de forma demasiado brusca.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    res.status(200).json({ success: true, solicitud });
+
+    SkydropxService.crearEnvio(
       solicitud.cliente,
       solicitud.celular,
       solicitud.email,
@@ -544,27 +562,21 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
         codigoPostal: codigo_postal
       },
       solicitud.modelo
-    );
-
-    if (simulado) {
-      console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
-    }
-
-    // No se toca el estatus acá: lo mueve el admin a mano (Preparando paquete ->
-    // Pendiente de envío -> Enviado). Esto solo guarda el domicilio y la guía.
-    const solicitudActualizada = await PersistenceService.guardarEnvio(id, {
-      tracking_number: trackingNumber,
-      label_url: labelUrl
-    });
-
-    return res.status(200).json({
-      success: true,
-      solicitud: solicitudActualizada || solicitud,
-      trackingNumber,
-      labelUrl
-    });
+    )
+      .then(async ({ trackingNumber, labelUrl, simulado }) => {
+        if (simulado) {
+          console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
+        }
+        // No se toca el estatus acá: lo mueve el admin a mano (Preparando paquete ->
+        // Pendiente de envío -> Enviado). Esto solo guarda la guía.
+        await PersistenceService.guardarEnvio(id, { tracking_number: trackingNumber, label_url: labelUrl });
+        console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${id}: ${trackingNumber}`);
+      })
+      .catch((skydropxError: any) => {
+        console.error(`[Skydropx] No se pudo generar la guía en segundo plano para la solicitud ${id}:`, skydropxError.message);
+      });
   } catch (error: any) {
-    console.error('Error al guardar domicilio y generar envío:', error);
+    console.error('Error al guardar domicilio:', error);
     return res.status(500).json({ error: error.message || 'Ocurrió un error al procesar el domicilio.' });
   }
 });

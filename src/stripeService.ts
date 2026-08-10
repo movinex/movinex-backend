@@ -61,17 +61,40 @@ export class StripeService {
     modelo: string,
     enganche: number,
     successUrl: string,
-    cancelUrl: string
+    cancelUrl: string,
+    costoEnvio: number = 0
   ): Promise<{ sessionId: string; url: string }> {
     const usarProduccion = this.usaProduccion(email);
     const client = this.getClient(usarProduccion);
-    const montoCentavos = Math.round(enganche * 100);
     const telefonoLimpio = telefono.replace(/\D/g, '');
     const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
 
-    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN (tarjeta/OXXO/SPEI, ${usarProduccion ? 'LIVE' : 'test'})`);
+    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN + $${costoEnvio} de envío (tarjeta/OXXO/SPEI, ${usarProduccion ? 'LIVE' : 'test'})`);
 
     const customer = await client.customers.create({ email, name: cliente });
+
+    // Envío como línea aparte (no sumado en un solo monto) para que el cliente vea el
+    // desglose en la página de Stripe, igual que en la Carátula de Condiciones.
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+      {
+        price_data: {
+          currency: 'mxn',
+          product_data: { name: `Enganche de celular - ${modelo}` },
+          unit_amount: Math.round(enganche * 100),
+        },
+        quantity: 1,
+      },
+    ];
+    if (costoEnvio > 0) {
+      lineItems.push({
+        price_data: {
+          currency: 'mxn',
+          product_data: { name: 'Costo de envío' },
+          unit_amount: Math.round(costoEnvio * 100),
+        },
+        quantity: 1,
+      });
+    }
 
     const session = await client.checkout.sessions.create({
       mode: 'payment',
@@ -84,16 +107,7 @@ export class StripeService {
         },
       },
       customer: customer.id,
-      line_items: [
-        {
-          price_data: {
-            currency: 'mxn',
-            product_data: { name: `Enganche de celular - ${modelo}` },
-            unit_amount: montoCentavos,
-          },
-          quantity: 1,
-        },
-      ],
+      line_items: lineItems,
       metadata: {
         solicitud_id: solicitudId,
         tipo: 'enganche',
