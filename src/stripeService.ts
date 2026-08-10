@@ -115,11 +115,12 @@ export class StripeService {
   /**
    * Lee el payment_method que quedó asociado a un PaymentIntent ya cobrado, junto con
    * su tipo (`card`, `oxxo`, `customer_balance`) — el webhook lo usa para decidir si
-   * puede armar la suscripción semanal automática (solo si es `card`, ver arriba).
+   * puede armar la suscripción semanal automática (solo si es `card`, ver arriba) — y
+   * el `receiptUrl` del recibo hosteado por Stripe (comprobante de pago para el admin).
    */
-  static async obtenerMetodoPagoDeIntent(paymentIntentId: string, usarProduccion: boolean): Promise<{ paymentMethodId: string; tipo: string }> {
+  static async obtenerMetodoPagoDeIntent(paymentIntentId: string, usarProduccion: boolean): Promise<{ paymentMethodId: string; tipo: string; receiptUrl: string | null }> {
     const paymentIntent = await this.getClient(usarProduccion).paymentIntents.retrieve(paymentIntentId, {
-      expand: ['payment_method'],
+      expand: ['payment_method', 'latest_charge'],
     });
     const paymentMethod = paymentIntent.payment_method;
     if (!paymentMethod) {
@@ -128,7 +129,9 @@ export class StripeService {
     if (typeof paymentMethod === 'string') {
       throw new Error(`El payment_method de ${paymentIntentId} no vino expandido.`);
     }
-    return { paymentMethodId: paymentMethod.id, tipo: paymentMethod.type };
+    const charge = paymentIntent.latest_charge;
+    const receiptUrl = charge && typeof charge !== 'string' ? charge.receipt_url : null;
+    return { paymentMethodId: paymentMethod.id, tipo: paymentMethod.type, receiptUrl };
   }
 
   /**

@@ -175,6 +175,20 @@ export class PersistenceService {
     return data[0];
   }
 
+  // Guarda la URL del recibo hosteado por Stripe (comprobante de pago del enganche),
+  // para que el admin pueda mostrárselo al cliente o consultarlo sin entrar al
+  // dashboard de Stripe.
+  static async guardarReciboPago(id: string, url: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ stripe_receipt_url: url })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
   // Guarda la CLABE persistente asignada al Customer de Stripe (cobro semanal manual
   // por saldo, ver stripeService.crearReferenciaPagoPersistente).
   static async guardarReferenciaPagoPersistente(id: string, clabe: string) {

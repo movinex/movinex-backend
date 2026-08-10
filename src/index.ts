@@ -851,8 +851,11 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       // sin links nuevos (decisión de negocio, reunión 07/08).
       if (customerId && paymentIntentId) {
         try {
-          const { paymentMethodId, tipo } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
+          const { paymentMethodId, tipo, receiptUrl } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
           await PersistenceService.guardarMetodoPagoEnganche(solicitud.id, tipo);
+          if (receiptUrl) {
+            await PersistenceService.guardarReciboPago(solicitud.id, receiptUrl);
+          }
 
           if (tipo !== 'card') {
             const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId, usarProduccion);
