@@ -37,24 +37,25 @@ export class StripeService {
   }
 
   /**
-   * Crea una Checkout Session hosteada por Stripe para el enganche, ofreciendo tarjeta,
-   * OXXO (voucher para pagar en efectivo en tienda) y SPEI (transferencia bancaria vía
-   * `customer_balance`/`mx_bank_transfer`). El frontend hace `window.location.href` a la
-   * `url` devuelta; el cliente paga en la página de Stripe y vuelve solo a `successUrl`.
+   * Crea una Checkout Session hosteada por Stripe para el enganche, ofreciendo tarjeta y
+   * OXXO (voucher para pagar en efectivo en tienda). SPEI (`customer_balance`) queda
+   * afuera a propósito: todavía no está validado del lado de Stripe (ver dashboard →
+   * Métodos de pago → Transferencias bancarias = "Deshabilitado"); si se lo pide
+   * explícito en `payment_method_types` Checkout lo muestra igual aunque no esté listo,
+   * por eso no va en la lista. El frontend hace `window.location.href` a la `url`
+   * devuelta; el cliente paga en la página de Stripe y vuelve solo a `successUrl`.
    *
    * `setup_future_usage: 'off_session'` va SOLO en `payment_method_options.card` (no a
-   * nivel de PaymentIntent): OXXO y SPEI son de un solo uso, un cliente no puede quedar
-   * "guardado" para cobrarle automático con esos métodos, así que solo el pago con
+   * nivel de PaymentIntent): OXXO es de un solo uso, un cliente no puede quedar
+   * "guardado" para cobrarle automático con ese método, así que solo el pago con
    * tarjeta deja lista la suscripción semanal automática — ver la nota en el webhook.
-   * El método `customer_balance` (SPEI) exige un `customer` ya existente al crear la
-   * Session — a diferencia de `card`/`oxxo`, no alcanza con `customer_email` +
-   * `customer_creation: 'always'` (Stripe rechaza la Session entera con "The payment
-   * method `customer_balance` requires `customer` to be set"), así que el Customer se
-   * crea explícitamente acá antes de armar la sesión.
+   * El Customer se crea explícitamente acá (no con `customer_email` +
+   * `customer_creation: 'always'`) para tenerlo ya armado si en el futuro se vuelve a
+   * sumar `customer_balance`, que sí lo exige.
    *
    * La confirmación real llega después por webhook: `checkout.session.completed`
-   * (tarjeta, síncrono) o `checkout.session.async_payment_succeeded` (OXXO/SPEI, el
-   * cliente paga horas o días después de generar el voucher/CLABE).
+   * (tarjeta, síncrono) o `checkout.session.async_payment_succeeded` (OXXO, el cliente
+   * paga horas o días después de generar el voucher).
    */
   static async crearCheckoutSession(
     solicitudId: string,
@@ -72,7 +73,7 @@ export class StripeService {
     const telefonoLimpio = telefono.replace(/\D/g, '');
     const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
 
-    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN + $${costoEnvio} de envío (tarjeta/OXXO/SPEI, ${usarProduccion ? 'LIVE' : 'test'})`);
+    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN + $${costoEnvio} de envío (tarjeta/OXXO, ${usarProduccion ? 'LIVE' : 'test'})`);
 
     const customer = await client.customers.create({ email, name: cliente });
 
@@ -101,13 +102,9 @@ export class StripeService {
 
     const session = await client.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card', 'oxxo', 'customer_balance'],
+      payment_method_types: ['card', 'oxxo'],
       payment_method_options: {
         card: { setup_future_usage: 'off_session' },
-        customer_balance: {
-          funding_type: 'bank_transfer',
-          bank_transfer: { type: 'mx_bank_transfer' },
-        },
       },
       customer: customer.id,
       line_items: lineItems,
