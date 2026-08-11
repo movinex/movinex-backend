@@ -463,41 +463,51 @@ app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) =
     }
 
     const emailActual = email !== undefined ? email : solicitud.email;
-    const campos: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
 
-    if (email !== undefined) {
-      campos.email = email;
-    }
+    // Paso rápido: subir lo que llegó al bucket y responder ya — Verificamex (OCR +
+    // biométrico) pega a una API externa y puede tardar más de un segundo, no tiene
+    // sentido que el cliente se quede mirando "Guardando..." en la foto todo ese
+    // tiempo cuando lo único que de verdad hace falta ahí es que la imagen quede
+    // guardada. La verificación corre después, en segundo plano (ver más abajo).
+    const camposRapidos: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
+    if (email !== undefined) camposRapidos.email = email;
+    if (ine_frente) camposRapidos.ine_frente = await PersistenceService.subirDocumentoKYC(ine_frente, 'ine_frente');
+    if (ine_reverso) camposRapidos.ine_reverso = await PersistenceService.subirDocumentoKYC(ine_reverso, 'ine_reverso');
+    if (selfie) camposRapidos.selfie = await PersistenceService.subirDocumentoKYC(selfie, 'selfie');
 
-    if (ine_frente) {
-      campos.ine_frente = await PersistenceService.subirDocumentoKYC(ine_frente, 'ine_frente');
+    const solicitudActualizada = await PersistenceService.guardarProgresoSolicitud(id, camposRapidos);
+    res.status(200).json({ success: true, solicitud: solicitudActualizada });
 
-      const datosIne = await VerificamexService.leerDatosINE(ine_frente, emailActual);
-      if (datosIne.nombre) campos.cliente = datosIne.nombre;
-      campos.curp = datosIne.curp;
-      // En modo mock (sin email "real") no se exige — ver el mismo criterio en /finalizar.
-      campos.ocr_ok = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
-    }
+    if (!ine_frente && !selfie) return;
 
-    if (ine_reverso) {
-      campos.ine_reverso = await PersistenceService.subirDocumentoKYC(ine_reverso, 'ine_reverso');
-    }
+    // Verificamex en segundo plano — ya se respondió, así que un error acá no debe
+    // tirar una excepción no manejada hacia afuera de este handler.
+    (async () => {
+      try {
+        const camposVerificacion: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
 
-    if (selfie) {
-      campos.selfie = await PersistenceService.subirDocumentoKYC(selfie, 'selfie');
-    }
+        if (ine_frente) {
+          const datosIne = await VerificamexService.leerDatosINE(ine_frente, emailActual);
+          if (datosIne.nombre) camposVerificacion.cliente = datosIne.nombre;
+          camposVerificacion.curp = datosIne.curp;
+          // En modo mock (sin email "real") no se exige — ver el mismo criterio en /finalizar.
+          camposVerificacion.ocr_ok = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
+        }
 
-    if (ine_frente || selfie) {
-      const frenteB64 = ine_frente || (solicitud.ine_frente ? await PersistenceService.descargarDocumentoKYC(solicitud.ine_frente) : null);
-      const selfieB64 = selfie || (solicitud.selfie ? await PersistenceService.descargarDocumentoKYC(solicitud.selfie) : null);
-      if (frenteB64 && selfieB64) {
-        const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, emailActual);
-        campos.biometrico_ok = biometricResult.valido;
+        const frenteB64 = ine_frente || (solicitud.ine_frente ? await PersistenceService.descargarDocumentoKYC(solicitud.ine_frente) : null);
+        const selfieB64 = selfie || (solicitud.selfie ? await PersistenceService.descargarDocumentoKYC(solicitud.selfie) : null);
+        if (frenteB64 && selfieB64) {
+          const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, emailActual);
+          camposVerificacion.biometrico_ok = biometricResult.valido;
+        }
+
+        if (Object.keys(camposVerificacion).length > 0) {
+          await PersistenceService.guardarProgresoSolicitud(id, camposVerificacion);
+        }
+      } catch (verificacionError: any) {
+        console.error(`[Progreso] Verificamex falló en segundo plano para la solicitud ${id}:`, verificacionError.message);
       }
-    }
-
-    const solicitudActualizada = await PersistenceService.guardarProgresoSolicitud(id, campos);
-    return res.status(200).json({ success: true, solicitud: solicitudActualizada });
+    })();
   } catch (error: any) {
     console.error('Error al guardar el progreso de la solicitud:', error);
     return res.status(500).json({ error: error.message || 'No se pudo guardar el progreso.' });
