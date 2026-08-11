@@ -433,7 +433,13 @@ app.get('/api/solicitudes/:id/resumen', async (req: Request, res: Response) => {
       estatus: solicitud.estatus,
       tieneIneFrente: Boolean(solicitud.ine_frente),
       tieneIneReverso: Boolean(solicitud.ine_reverso),
-      tieneSelfie: Boolean(solicitud.selfie)
+      tieneSelfie: Boolean(solicitud.selfie),
+      // null = todavía no se corrió esa verificación; false = corrió y no pasó (foto
+      // ilegible o la cara no hizo match) — el frontend usa esto para no mostrar esas
+      // fotos como "cargada correctamente" cuando en realidad son la causa de que la
+      // solicitud haya quedado en revisión manual.
+      ocrOk: solicitud.ocr_ok,
+      biometricoOk: solicitud.biometrico_ok
     });
   } catch (error: any) {
     console.error('Error al obtener el resumen de la solicitud:', error);
