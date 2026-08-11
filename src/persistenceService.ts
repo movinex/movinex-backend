@@ -447,6 +447,18 @@ export class PersistenceService {
     if (error) throw error;
   }
 
+  // Limpieza diaria (cron) — borra códigos OTP ya expirados, no queda nada útil
+  // en esas filas una vez pasado expira_en (ver getOtpVerificado, que ya los ignora).
+  static async eliminarOtpExpirados() {
+    const { error, count } = await supabase
+      .from('otp_codigos')
+      .delete({ count: 'exact' })
+      .lt('expira_en', new Date().toISOString());
+
+    if (error) throw error;
+    return count ?? 0;
+  }
+
   static async marcarOtpVerificado(id: string) {
     const { error } = await supabase
       .from('otp_codigos')

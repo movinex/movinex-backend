@@ -1242,6 +1242,18 @@ cron.schedule('0 9 * * *', () => {
   });
 }, { timezone: 'America/Mexico_City' });
 
+// Cron diario que borra los códigos OTP ya expirados (no se usan para nada
+// una vez pasado expira_en — ver PersistenceService.getOtpVerificado). Evita
+// que otp_codigos crezca sin límite.
+cron.schedule('0 4 * * *', () => {
+  console.log('[Cron] Borrando códigos OTP expirados...');
+  PersistenceService.eliminarOtpExpirados()
+    .then((count) => console.log(`[Cron] ${count} códigos OTP expirados borrados.`))
+    .catch((error) => {
+      console.error('[Cron] Error al borrar códigos OTP expirados:', error.message);
+    });
+}, { timezone: 'America/Mexico_City' });
+
 // Iniciar servidor
 app.listen(PORT, () => {
   console.log(`🚀 Servidor de Movinex corriendo de manera segura en http://localhost:${PORT}`);
