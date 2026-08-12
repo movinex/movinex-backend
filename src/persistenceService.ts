@@ -148,15 +148,29 @@ export class PersistenceService {
 
   // Cierra el ciclo: corre después de Verificamex (POST /:id/finalizar en index.ts),
   // con el nombre/CURP leídos por OCR y el estatus ya decidido.
-  static async finalizarSolicitud(id: string, datos: { cliente: string; curp: string | null; estatus: string; acepta_terminos: boolean }) {
+  static async finalizarSolicitud(id: string, datos: {
+    cliente: string;
+    curp: string | null;
+    estatus: string;
+    acepta_terminos: boolean;
+    ocr_ok?: boolean | null;
+    biometrico_ok?: boolean | null;
+  }) {
+    const update: Record<string, any> = {
+      cliente: datos.cliente,
+      curp: datos.curp,
+      estatus: datos.estatus,
+      acepta_terminos: datos.acepta_terminos
+    };
+    // Solo se pisan si de verdad se recalcularon acá (index.ts corre el chequeo si
+    // llegó en null) — si ya venían con un valor de PATCH /progreso, no hace falta
+    // tocarlos de nuevo.
+    if (datos.ocr_ok !== undefined) update.ocr_ok = datos.ocr_ok;
+    if (datos.biometrico_ok !== undefined) update.biometrico_ok = datos.biometrico_ok;
+
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({
-        cliente: datos.cliente,
-        curp: datos.curp,
-        estatus: datos.estatus,
-        acepta_terminos: datos.acepta_terminos
-      })
+      .update(update)
       .eq('id', id)
       .select();
 

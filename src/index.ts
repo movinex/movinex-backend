@@ -529,20 +529,52 @@ app.post('/api/solicitudes/:id/finalizar', async (req: Request, res: Response) =
     }
 
     const kycResult = await VerificamexService.validarTelefono(solicitud.celular);
-    const biometricoOk = solicitud.biometrico_ok !== false;
-    const ocrOk = solicitud.ocr_ok !== false;
+
+    // `biometrico_ok`/`ocr_ok` pueden seguir en null acá aunque las fotos ya estén
+    // subidas: el chequeo que dispara PATCH /progreso corre en segundo plano (fire-
+    // and-forget, para que esa respuesta sea rápida) y todavía puede no haber
+    // terminado si el cliente tocó "Enviar" muy rápido después de subir la selfie.
+    // Tratar null como "válido" en ese caso es un bypass real de la verificación
+    // (bug encontrado 2026-08-12: aprobó una solicitud con selfie de otra persona
+    // porque el chequeo real terminó *después* de este endpoint). Si las fotos están
+    // pero el resultado no llegó todavía, se corre acá mismo antes de decidir.
+    let biometricoOkRaw = solicitud.biometrico_ok;
+    let ocrOkRaw = solicitud.ocr_ok;
+    let cliente = solicitud.cliente;
+    let curp = solicitud.curp;
+
+    if (solicitud.ine_frente && solicitud.selfie && biometricoOkRaw === null) {
+      const [frenteB64, selfieB64] = await Promise.all([
+        PersistenceService.descargarDocumentoKYC(solicitud.ine_frente),
+        PersistenceService.descargarDocumentoKYC(solicitud.selfie)
+      ]);
+      const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, solicitud.email);
+      biometricoOkRaw = biometricResult.valido;
+
+      if (ocrOkRaw === null) {
+        const datosIne = await VerificamexService.leerDatosINE(frenteB64, solicitud.email);
+        if (datosIne.nombre) cliente = datosIne.nombre;
+        curp = datosIne.curp;
+        ocrOkRaw = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
+      }
+    }
+
+    const biometricoOk = biometricoOkRaw !== false;
+    const ocrOk = ocrOkRaw !== false;
     const esSolicitudValida = kycResult.valido && biometricoOk && ocrOk;
     const estatusFinal = esSolicitudValida ? 'Aprobado' : 'Pendiente';
 
     if (!esSolicitudValida) {
-      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${solicitud.cliente} con teléfono ${solicitud.celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricoOk ? 'OK' : 'RECHAZADO'}, Lectura INE: ${ocrOk ? 'OK' : 'INCOMPLETA/ILEGIBLE'}).`);
+      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${solicitud.celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricoOk ? 'OK' : 'RECHAZADO'}, Lectura INE: ${ocrOk ? 'OK' : 'INCOMPLETA/ILEGIBLE'}).`);
     }
 
     const solicitudFinal = await PersistenceService.finalizarSolicitud(id, {
-      cliente: solicitud.cliente,
-      curp: solicitud.curp,
+      cliente,
+      curp,
       estatus: estatusFinal,
-      acepta_terminos: Boolean(aceptaTerminos)
+      acepta_terminos: Boolean(aceptaTerminos),
+      ocr_ok: ocrOkRaw,
+      biometrico_ok: biometricoOkRaw
     });
 
     return res.status(200).json({
