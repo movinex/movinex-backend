@@ -209,11 +209,15 @@ export class StripeService {
 
   /**
    * Le da al Customer una CLABE fija y reutilizable (no ligada a un pago puntual) para
-   * que siempre transfiera/deposite al mismo número de referencia — decisión de
-   * negocio (reunión 07/08): en vez de un link de pago nuevo cada semana, el cliente
-   * paga siempre a la misma cuenta. Sirve tanto para SPEI (transferencia directa desde
-   * su banco) como para depositar efectivo en OXXO referenciando esa misma CLABE (un
-   * "depósito referenciado" bancario normal en México, nada específico de Stripe).
+   * que siempre transfiera al mismo número de referencia — decisión de negocio
+   * (reunión 07/08): en vez de un link de pago nuevo cada semana, el cliente paga
+   * siempre a la misma cuenta. **Solo sirve para SPEI** (transferencia directa desde
+   * su banco) — a diferencia de lo que se asumió al principio, esta CLABE NO sirve
+   * para depositar efectivo en OXXO: confirmado contra la documentación de Stripe
+   * (`docs.stripe.com/payments/customer-balance/funding-instructions`), el
+   * `financial_addresses` que devuelve para México solo trae `spei` en
+   * `supported_networks`, nada de OXXO. Los clientes que pagaron el enganche con OXXO
+   * usan `crearPagoSemanalOxxo` en su lugar (ver abajo), no este método.
    * `createFundingInstructions` es idempotente por customer+currency+tipo: llamarlo de
    * nuevo para el mismo customer devuelve la misma CLABE, no crea una nueva.
    */
@@ -279,6 +283,56 @@ export class StripeService {
 
     console.log('[Stripe] Suscripción (cobro por saldo) creada con éxito:', subscription.id);
     return { subscriptionId: subscription.id };
+  }
+
+  /**
+   * Genera un voucher de OXXO nuevo para el cobro semanal de un cliente que pagó el
+   * enganche con OXXO. A diferencia de SPEI, OXXO no soporta pagos recurrentes ni
+   * fondear un balance (Stripe: "Recurring payments: Not supported", "Usability:
+   * Single-use", cada voucher trae su propio número de referencia de 32 dígitos y
+   * vence a los 5 días) — no hay forma de darle una referencia fija reutilizable como
+   * la CLABE de SPEI, así que hay que generarle un `PaymentIntent`/Checkout Session
+   * nueva cada semana, igual que con el enganche. `metadata.tipo: 'cobro_semanal'`
+   * es lo que el webhook usa para no confundir esta Session con la del enganche.
+   */
+  static async crearPagoSemanalOxxo(
+    solicitudId: string,
+    customerId: string,
+    monto: number,
+    numeroSemana: number,
+    origin: string,
+    usarProduccion: boolean
+  ): Promise<{ sessionId: string; url: string }> {
+    console.log(`[Stripe] Creando voucher OXXO semana #${numeroSemana} por $${monto} MXN para ${customerId}`);
+
+    const session = await this.getClient(usarProduccion).checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['oxxo'],
+      customer: customerId,
+      line_items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product_data: { name: `Pago semanal Movinex #${numeroSemana}` },
+            unit_amount: Math.round(monto * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        solicitud_id: solicitudId,
+        tipo: 'cobro_semanal',
+        numero_semana: String(numeroSemana),
+      },
+      success_url: `${origin}/`,
+      cancel_url: `${origin}/`,
+    });
+
+    if (!session.url) {
+      throw new Error('Stripe no devolvió una URL de checkout para el voucher OXXO semanal.');
+    }
+
+    return { sessionId: session.id, url: session.url };
   }
 
   /**

@@ -9,6 +9,7 @@ export class WhatsappOtpService {
   private static PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
   private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
+  private static COBRO_OXXO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_OXXO_TEMPLATE_NAME || 'movinex_cobro_semanal_oxxo';
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
   private static ENVIADO_TEMPLATE_NAME = process.env.WHATSAPP_ENVIADO_TEMPLATE_NAME || 'movinex_pedido_enviado';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
@@ -82,11 +83,13 @@ export class WhatsappOtpService {
   /**
    * Manda la referencia de pago (CLABE persistente) para el cobro semanal manual —
    * ver `StripeService.crearReferenciaPagoPersistente` y `cobrosSemanalesService.ts`.
-   * Un mismo mensaje sirve para dos momentos: (1) una sola vez, apenas se confirma el
-   * enganche, para avisarle al cliente su CLABE fija; (2) cada semana después, como
-   * recordatorio con el mismo número — nunca cambia (decisión de negocio, reunión
-   * 07/08: una referencia fija en vez de un link nuevo cada vez). Usa la plantilla
-   * `WHATSAPP_COBRO_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
+   * **Solo para clientes que pagaron el enganche por SPEI** (`metodo_pago_enganche:
+   * 'customer_balance'`) — la CLABE nunca cambia semana a semana (decisión de negocio,
+   * reunión 07/08: una referencia fija en vez de un link nuevo cada vez), así que este
+   * mismo mensaje sirve de recordatorio todas las semanas. Los de OXXO usan
+   * `enviarLinkPagoSemanalOxxo` en su lugar — OXXO no soporta una referencia fija
+   * reutilizable (ver el comentario en `StripeService.crearPagoSemanalOxxo`). Usa la
+   * plantilla `WHATSAPP_COBRO_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
    */
   static async enviarRecordatorioPagoSemanal(
     celular: string,
@@ -187,6 +190,63 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp Pago Confirmado] Error al enviar la confirmación:', error.response?.data || error.message);
       throw new Error('No se pudo enviar la confirmación de pago por WhatsApp.');
+    }
+  }
+
+  /**
+   * Recordatorio de pago semanal para clientes que pagaron el enganche con OXXO — a
+   * diferencia de SPEI (`enviarRecordatorioPagoSemanal`, misma CLABE toda la vida),
+   * cada semana hay un link nuevo (`StripeService.crearPagoSemanalOxxo`) porque OXXO no
+   * soporta una referencia reutilizable. Necesita su propia plantilla porque el body es
+   * distinto (manda un link, no una CLABE) — `WHATSAPP_COBRO_OXXO_TEMPLATE_NAME`.
+   */
+  static async enviarLinkPagoSemanalOxxo(
+    celular: string,
+    cliente: string,
+    link: string,
+    monto: number,
+    numeroSemana: number
+  ): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Cobro Semanal OXXO MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN, link: ${link}`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: this.COBRO_OXXO_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: String(numeroSemana) },
+                  { type: 'text', text: monto.toLocaleString('es-MX') },
+                  { type: 'text', text: link }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Cobro Semanal OXXO] Link de la semana #${numeroSemana} enviado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Cobro Semanal OXXO] Error al enviar el link:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar el link de pago semanal (OXXO) por WhatsApp.');
     }
   }
 

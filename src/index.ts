@@ -1033,6 +1033,19 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
+      // Un voucher semanal de OXXO (StripeService.crearPagoSemanalOxxo) dispara este
+      // mismo evento — hay que procesarlo distinto del enganche: solo cuenta la semana
+      // pagada, no toca pago_confirmado ni intenta armar ninguna Subscription.
+      if (session.metadata?.tipo === 'cobro_semanal') {
+        const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId, session.id);
+        if (resultado.yaProcesada) {
+          console.log(`[Stripe Webhook] Voucher OXXO ${session.id} de la solicitud ${solicitudId} ya se había procesado — reintento del webhook, se ignora.`);
+          return res.status(200).json({ received: true });
+        }
+        console.log(`[Stripe Webhook] Pago semanal OXXO confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+        return res.status(200).json({ received: true });
+      }
+
       const solicitud = await PersistenceService.getSolicitudById(solicitudId);
       if (!solicitud) {
         console.warn(`[Stripe Webhook] No se encontró la solicitud ${solicitudId}.`);
@@ -1043,12 +1056,15 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
       console.log(`[Stripe Webhook] Pago confirmado para la solicitud ${solicitudId}.`);
 
-      // Arma el cobro semanal automático a partir de cómo se pagó el enganche. Con
-      // tarjeta: Subscription clásica cobrando la tarjeta guardada. Sin tarjeta
-      // (OXXO/SPEI, que no se pueden dejar guardados): CLABE persistente + Subscription
-      // "send_invoice" que se cobra sola del saldo cuando el cliente deposita — el
-      // cliente recibe esa CLABE una vez por WhatsApp y la reutiliza todas las semanas,
-      // sin links nuevos (decisión de negocio, reunión 07/08).
+      // Arma el cobro semanal automático a partir de cómo se pagó el enganche.
+      // - Tarjeta: Subscription clásica cobrando la tarjeta guardada.
+      // - SPEI (customer_balance): CLABE persistente + Subscription "send_invoice" que
+      //   se cobra sola del saldo cuando el cliente deposita — el cliente recibe esa
+      //   CLABE una vez por WhatsApp y la reutiliza todas las semanas.
+      // - OXXO: nada de Subscription ni CLABE — OXXO no soporta cobro recurrente ni una
+      //   referencia fija reutilizable (confirmado en la documentación de Stripe), así
+      //   que solo se guarda el customer_id para poder generarle un voucher nuevo cada
+      //   semana (ver cobrosSemanalesService.ts → procesarPendientesOxxo).
       if (customerId && paymentIntentId) {
         try {
           const { paymentMethodId, tipo, receiptUrl } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
@@ -1057,7 +1073,21 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             await PersistenceService.guardarReciboPago(solicitud.id, receiptUrl);
           }
 
-          if (tipo !== 'card') {
+          if (tipo === 'oxxo') {
+            await PersistenceService.guardarStripeCustomerId(solicitud.id, customerId);
+            // Mismo criterio que SPEI: el primer cobro real vence en 7 días, el cron
+            // (cobrosSemanalesService.ts) genera el primer voucher ese día, no acá.
+            await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+            try {
+              const linkContinuar = `${ALLOWED_ORIGINS[0]}/domicilio?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+            } catch (whatsappError: any) {
+              console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+            }
+
+            console.log(`[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con OXXO — cobro semanal por voucher nuevo cada semana, sin Subscription.`);
+          } else if (tipo === 'customer_balance') {
             const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId, usarProduccion);
             const { subscriptionId } = await StripeService.crearSuscripcionConSaldo(
               solicitud.id,
@@ -1076,8 +1106,8 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // semana entera.
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
-            // El pago con OXXO/SPEI se confirma horas o días después de que el cliente
-            // salió del navegador (a diferencia de tarjeta, que Stripe redirige solo vía
+            // El pago con SPEI se confirma horas o días después de que el cliente salió
+            // del navegador (a diferencia de tarjeta, que Stripe redirige solo vía
             // success_url) — sin este aviso, nadie le dice que ya puede volver a cargar
             // su domicilio. Mismo link que usa crear-orden-enganche para success_url.
             try {
@@ -1088,7 +1118,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             }
 
             console.log(
-              `[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con "${tipo}" (no tarjeta) — ` +
+              `[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con SPEI — ` +
               `CLABE persistente ${clabe} asignada, suscripción ${subscriptionId} armada (send_invoice).`
             );
           } else {
@@ -1223,22 +1253,30 @@ app.post('/api/webhooks/verificacion-cliente', async (req: Request, res: Respons
 // sin esperar al horario programado.
 app.post('/api/admin/cobros-semanales/procesar', requireAdminAuth, async (req: Request, res: Response) => {
   try {
-    const resultado = await CobrosSemanalesService.procesarPendientes();
-    return res.status(200).json({ success: true, ...resultado });
+    const origin = (req.headers.origin as string) || ALLOWED_ORIGINS[0];
+    const [spei, oxxo] = await Promise.all([
+      CobrosSemanalesService.procesarPendientes(),
+      CobrosSemanalesService.procesarPendientesOxxo(origin),
+    ]);
+    return res.status(200).json({ success: true, spei, oxxo });
   } catch (error: any) {
     console.error('Error al procesar cobros semanales:', error.message);
     return res.status(500).json({ error: error.message || 'No se pudieron procesar los cobros semanales.' });
   }
 });
 
-// Cron diario (9am hora de Ciudad de México) que manda los links de pago semanal
-// pendientes por WhatsApp a quienes pagaron el enganche con OXXO/SPEI — ver
-// cobrosSemanalesService.ts. Corre en el mismo proceso porque Railway mantiene este
-// servidor Express siempre corriendo (no es una función serverless).
+// Cron diario (9am hora de Ciudad de México) que manda los recordatorios/vouchers de
+// pago semanal pendientes por WhatsApp a quienes pagaron el enganche con OXXO/SPEI —
+// ver cobrosSemanalesService.ts (SPEI reenvía la misma CLABE, OXXO genera un voucher
+// nuevo cada vez). Corre en el mismo proceso porque Railway mantiene este servidor
+// Express siempre corriendo (no es una función serverless).
 cron.schedule('0 9 * * *', () => {
   console.log('[Cron] Procesando cobros semanales pendientes...');
   CobrosSemanalesService.procesarPendientes().catch((error) => {
-    console.error('[Cron] Error al procesar cobros semanales:', error.message);
+    console.error('[Cron] Error al procesar cobros semanales (SPEI):', error.message);
+  });
+  CobrosSemanalesService.procesarPendientesOxxo(ALLOWED_ORIGINS[0]).catch((error) => {
+    console.error('[Cron] Error al procesar cobros semanales (OXXO):', error.message);
   });
 }, { timezone: 'America/Mexico_City' });
 

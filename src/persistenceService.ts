@@ -241,6 +241,20 @@ export class PersistenceService {
     return data[0];
   }
 
+  // Guarda solo el customer_id de Stripe, sin subscription_id — caso de OXXO, que no
+  // tiene ninguna Subscription asociada (no soporta cobro recurrente) pero igual
+  // necesita el customer_id guardado para poder generarle un voucher nuevo cada semana.
+  static async guardarStripeCustomerId(id: string, stripeCustomerId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ stripe_customer_id: stripeCustomerId })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
   // Guarda con qué tipo de payment_method se pagó el enganche ('card', 'oxxo',
   // 'customer_balance') — decide si la solicitud queda en cobro automático (tarjeta,
   // Stripe Subscription) o en cobro semanal manual por WhatsApp (OXXO/SPEI).
@@ -296,15 +310,33 @@ export class PersistenceService {
     return data[0];
   }
 
-  // Trae las solicitudes en cobro semanal manual (OXXO/SPEI) a las que les toca recibir
-  // un nuevo link de pago hoy — cobrosSemanalesService las procesa una por una.
+  // Trae las solicitudes que pagaron el enganche por SPEI (customer_balance) y les toca
+  // recordatorio hoy — cobrosSemanalesService les reenvía la misma CLABE persistente,
+  // que sí es válida para SPEI (confirmado contra la documentación de Stripe:
+  // financial_addresses de México solo trae `spei` como red soportada).
   // El filtro semanas_pagadas < semanas se hace en JS porque PostgREST no soporta
   // comparar dos columnas entre sí directamente en un `.lt()`.
-  static async getSolicitudesConCobroSemanalPendiente() {
+  static async getSolicitudesConCobroSpeiPendiente() {
     const { data, error } = await supabase
       .from('solicitudes')
       .select('*')
-      .in('metodo_pago_enganche', ['oxxo', 'customer_balance'])
+      .eq('metodo_pago_enganche', 'customer_balance')
+      .eq('pago_confirmado', true)
+      .lte('proximo_cobro_semanal', new Date().toISOString());
+
+    if (error) throw error;
+    return (data || []).filter((s: any) => Number(s.semanas_pagadas || 0) < Number(s.semanas));
+  }
+
+  // Igual que arriba pero para OXXO — a diferencia de SPEI, OXXO no soporta pagos
+  // recurrentes ni fondear un balance (Stripe: "Recurring payments: Not supported",
+  // "Usability: Single-use"), así que no hay CLABE que reenviar — cobrosSemanalesService
+  // le genera un voucher nuevo cada semana a cada una de estas.
+  static async getSolicitudesConCobroOxxoPendiente() {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .eq('metodo_pago_enganche', 'oxxo')
       .eq('pago_confirmado', true)
       .lte('proximo_cobro_semanal', new Date().toISOString());
 
