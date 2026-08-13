@@ -666,30 +666,6 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
   }
 });
 
-// POST: Bypass TEMPORAL para marcar el enganche como pagado sin pasar por el
-// procesador de pagos — pensado solo para poder seguir probando el resto del flujo
-// (Skydropx/Domicilio) sin cobrar una tarjeta real. Quitar antes de ir a producción
-// definitiva (ver Trello MX-0061).
-app.post('/api/solicitudes/:id/aprobar-pago-manual', async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-
-    const solicitud = await PersistenceService.getSolicitudById(id);
-    if (!solicitud) {
-      return res.status(404).json({ error: 'Solicitud no encontrada.' });
-    }
-
-    const identificador = solicitud.email || solicitud.celular;
-    await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
-
-    console.warn(`[BYPASS MANUAL] Enganche de la solicitud ${id} (${identificador}) marcado como pagado SIN pasar por el procesador de pagos.`);
-    return res.status(200).json({ success: true });
-  } catch (error: any) {
-    console.error('Error en aprobar-pago-manual:', error.message);
-    return res.status(500).json({ error: 'No se pudo aprobar el pago manualmente.' });
-  }
-});
-
 /**
  * @swagger
  * /api/solicitudes/{id}/domicilio:
