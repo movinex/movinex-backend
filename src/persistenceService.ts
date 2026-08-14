@@ -215,14 +215,38 @@ export class PersistenceService {
   // estatus a "Preparando paquete" en la misma actualización — a partir de acá el
   // admin arma la caja, carga el IMEI, y va avanzando el estatus a mano
   // (Preparando paquete -> Pendiente de envío -> Enviado).
-  static async marcarPagoConfirmadoByContacto(contacto: string) {
-    const telefonoLimpio = contacto.replace(/\D/g, '');
-    const telefonoSinPrefijo = telefonoLimpio.slice(-10);
+  // Busca solicitudes por email o celular. Solo la usa el webhook de Conekta (inactivo),
+  // que a diferencia de Stripe no manda un solicitud_id propio. Cortocircuita si el
+  // contacto no tiene teléfono utilizable: la versión anterior armaba el filtro
+  // `celular.ilike.%${...}` con el sufijo vacío cuando el contacto era un email sin
+  // dígitos, y ese `%` suelto matcheaba TODAS las filas de la tabla (bug encontrado
+  // 2026-08-14: 12 de 12 solicitudes habían quedado marcadas como pagadas con 5 pagos
+  // reales).
+  static async getSolicitudesByContacto(contacto: string) {
+    const filtros: string[] = [];
+    if (contacto.includes('@')) {
+      filtros.push(`email.eq.${contacto}`);
+    }
+    const telefonoSinPrefijo = contacto.replace(/\D/g, '').slice(-10);
+    if (telefonoSinPrefijo.length === 10) {
+      filtros.push(`celular.ilike.%${telefonoSinPrefijo}`);
+    }
+    if (!filtros.length) return [];
 
     const { data, error } = await supabase
       .from('solicitudes')
+      .select('*')
+      .or(filtros.join(','));
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async marcarPagoConfirmado(solicitudId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
       .update({ pago_confirmado: true, estatus: 'Preparando paquete' })
-      .or(`email.eq.${contacto},celular.ilike.%${telefonoSinPrefijo}`)
+      .eq('id', solicitudId)
       .select();
 
     if (error) throw error;

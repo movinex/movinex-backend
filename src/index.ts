@@ -33,7 +33,11 @@ app.enable('trust proxy');
 // DDoS Protection: Limitador de tasa (Rate Limiting)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100, // Máximo 100 peticiones por IP en esta ventana
+  // Un cliente consume ~15 requests en el flujo completo (OTP, progreso de cada foto,
+  // resumen, finalizar, checkout). Las operadoras móviles mexicanas hacen NAT, así que
+  // muchos clientes reales comparten IP: con el límite viejo de 100 alcanzaban ~7
+  // compradores simultáneos por operadora para empezar a bloquear ventas legítimas.
+  max: 500,
   standardHeaders: true, // Retorna info de límites en las cabeceras `RateLimit-*`
   legacyHeaders: false, // Desactiva cabeceras antiguas `X-RateLimit-*`
   message: {
@@ -52,7 +56,13 @@ const ALLOWED_ORIGINS = [
 app.use(cors({
   origin: ALLOWED_ORIGINS,
 }));
-app.use('/api/', apiLimiter); // Aplicar protección a todas las rutas bajo /api/
+// El webhook de Stripe queda fuera del rate limit: lo llama Stripe, no un navegador, y
+// una ráfaga de eventos (varios pagos juntos) no debe recibir 429 — es la fuente de
+// verdad del cobro.
+app.use('/api/', (req: Request, res: Response, next) => {
+  if (req.path.startsWith('/webhooks/')) return next();
+  return apiLimiter(req, res, next);
+});
 
 // El webhook de Stripe necesita el body crudo (bytes exactos) para verificar la firma
 // con stripe.webhooks.constructEvent — por eso se excluye del parser JSON global y usa
@@ -643,6 +653,16 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
+    // Gates server-side, no solo en la UI: este endpoint es público (el cliente llega
+    // por deep link, sin sesión) así que el frontend no alcanza para impedir que una
+    // solicitud rechazada/en revisión pague, ni que una ya pagada pague dos veces.
+    if (solicitud.pago_confirmado) {
+      return res.status(409).json({ error: 'Esta solicitud ya tiene el enganche pagado.' });
+    }
+    if (solicitud.estatus !== 'Aprobado') {
+      return res.status(409).json({ error: 'Esta solicitud todavía no está aprobada para pagar.' });
+    }
+
     const origin = (req.headers.origin as string) || ALLOWED_ORIGINS[0];
     const successUrl = `${origin}/domicilio?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
     const cancelUrl = `${origin}/`;
@@ -947,7 +967,10 @@ app.post('/api/webhooks/conekta', async (req: Request, res: Response) => {
       if (email || phone) {
         const identificador = email || phone;
 
-        const solicitudesActualizadas = await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
+        const solicitudesActualizadas = await PersistenceService.getSolicitudesByContacto(identificador);
+        for (const s of solicitudesActualizadas) {
+          await PersistenceService.marcarPagoConfirmado(s.id);
+        }
 
         if (solicitudesActualizadas && solicitudesActualizadas.length > 0) {
           console.log(`[Conekta Webhook] Pago confirmado para ${solicitudesActualizadas.length} solicitud(es) del cliente.`);
@@ -1061,8 +1084,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
-      const identificador = solicitud.email || solicitud.celular;
-      await PersistenceService.marcarPagoConfirmadoByContacto(identificador);
+      await PersistenceService.marcarPagoConfirmado(solicitudId);
       console.log(`[Stripe Webhook] Pago confirmado para la solicitud ${solicitudId}.`);
 
       // Arma el cobro semanal automático a partir de cómo se pagó el enganche.
