@@ -80,6 +80,20 @@ export class SkydropxService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Skydropx Pro rechaza address_to.name con más de 30 caracteres (error real
+  // encontrado 2026-08-14: "CRISTIAN JAIR MARQUEZ HERNANDEZ", 31 caracteres, hizo
+  // fallar la guía real y cayó en silencio al tracking simulado sin que nadie se
+  // enterara). Nombres compuestos + dos apellidos son comunes en México y superan el
+  // límite seguido, así que se recorta por palabra completa en vez de dejar que la
+  // API rechace la guía entera.
+  private static truncarNombreDireccion(nombre: string, maxLen = 30): string {
+    const limpio = nombre.trim();
+    if (limpio.length <= maxLen) return limpio;
+    const cortado = limpio.slice(0, maxLen);
+    const ultimoEspacio = cortado.lastIndexOf(' ');
+    return (ultimoEspacio > 0 ? cortado.slice(0, ultimoEspacio) : cortado).trim();
+  }
+
   /**
    * Genera una guía real con Skydropx Pro (OAuth2). Go-live (2026-08-10): por default
    * usa producción (SKYDROPX_PROD_*) — solo el email exacto desarrollo@movinex.mx cae
@@ -112,7 +126,7 @@ export class SkydropxService {
       const telefonoLimpio = telefono.replace(/\D/g, '');
 
       const addressTo = {
-        name: cliente,
+        name: this.truncarNombreDireccion(cliente),
         street1: domicilio.calle,
         street_number: domicilio.numeroExterior,
         apartment_number: domicilio.numeroInterior || undefined,
