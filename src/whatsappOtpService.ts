@@ -12,6 +12,7 @@ export class WhatsappOtpService {
   private static COBRO_OXXO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_OXXO_TEMPLATE_NAME || 'movinex_cobro_semanal_oxxo';
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
   private static ENVIADO_TEMPLATE_NAME = process.env.WHATSAPP_ENVIADO_TEMPLATE_NAME || 'movinex_pedido_enviado';
+  private static ENTREGADO_TEMPLATE_NAME = process.env.WHATSAPP_ENTREGADO_TEMPLATE_NAME || 'movinex_pedido_entregado';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
   private static GRAPH_URL = 'https://graph.facebook.com/v20.0';
 
@@ -294,6 +295,54 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp Pedido Enviado] Error al enviar el aviso:', error.response?.data || error.message);
       throw new Error('No se pudo enviar el aviso de envío por WhatsApp.');
+    }
+  }
+
+  /**
+   * Avisa que el paquete ya fue entregado — lo dispara entregasService.ts cuando el
+   * tracking de Skydropx confirma el estado ENTREGADO/DELIVERED (ver conversación
+   * 2026-08-14, cron de verificación de entregas). Necesita su propia plantilla nueva
+   * en WhatsApp Manager (`WHATSAPP_ENTREGADO_TEMPLATE_NAME`, sin dar de alta todavía).
+   */
+  static async enviarPedidoEntregado(celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Pedido Entregado MOCK] ${celular} (${cliente}) — ${modelo} entregado.`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: this.ENTREGADO_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: modelo }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Pedido Entregado] Aviso de entrega mandado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Pedido Entregado] Error al enviar el aviso:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar el aviso de entrega por WhatsApp.');
     }
   }
 

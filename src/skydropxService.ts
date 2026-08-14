@@ -104,7 +104,7 @@ export class SkydropxService {
       codigoPostal: string;
     },
     modelo: string
-  ): Promise<{ trackingNumber: string; labelUrl: string | null; simulado?: boolean; rawData?: any }> {
+  ): Promise<{ trackingNumber: string; labelUrl: string | null; carrier?: string; simulado?: boolean; rawData?: any }> {
     try {
       const usarProduccion = email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
       const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
@@ -210,7 +210,10 @@ export class SkydropxService {
       }
 
       console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Guía generada con éxito. Tracking:`, trackingNumber);
-      return { trackingNumber, labelUrl, rawData: shipmentData };
+      // Se guarda para poder consultar el estado de entrega después (ver
+      // consultarEstadoEntrega) — el endpoint de tracking de Skydropx pide el nombre
+      // del carrier además del número de guía.
+      return { trackingNumber, labelUrl, carrier: tarifaElegida.provider_display_name, rawData: shipmentData };
 
     } catch (error: any) {
       console.error('[Skydropx] Error al generar la guía de envío:', error.response?.data || error.message);
@@ -221,5 +224,37 @@ export class SkydropxService {
         labelUrl: null
       };
     }
+  }
+
+  // Estados de entrega que devuelve Skydropx Pro. No confirmado 100% contra la API
+  // real todavía (la documentación pública no deja del todo claro el shape exacto) —
+  // ver consultarEstadoEntrega.
+  static readonly ESTADOS_ENTREGADO = ['ENTREGADO', 'DELIVERED'];
+
+  /**
+   * Consulta el estado actual de un envío ya generado — usado por el cron de
+   * verificación de entregas (ver entregasService.ts) en vez de depender de un
+   * webhook de Skydropx (no confirmado si aplica a esta cuenta "Pro", ver
+   * conversación 2026-08-14). Requiere el carrier guardado en crearEnvio.
+   */
+  static async consultarEstadoEntrega(
+    trackingNumber: string,
+    carrier: string,
+    usarProduccion: boolean
+  ): Promise<{ status: string; entregado: boolean; rawData?: any }> {
+    const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+    const auth = await this.authHeaders(usarProduccion);
+
+    const response = await axios.get(
+      `${baseUrl}/api/v1/shipments/tracking/${encodeURIComponent(trackingNumber)}/${encodeURIComponent(carrier)}`,
+      auth
+    );
+
+    const status: string = response.data?.status || response.data?.data?.attributes?.status || '';
+    return {
+      status,
+      entregado: this.ESTADOS_ENTREGADO.includes(status.toUpperCase()),
+      rawData: response.data
+    };
   }
 }

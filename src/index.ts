@@ -8,6 +8,7 @@ import { ConektaService } from './conektaService';
 import { StripeService } from './stripeService';
 import { CobrosSemanalesService } from './cobrosSemanalesService';
 import { SkydropxService } from './skydropxService';
+import { EntregasService } from './entregasService';
 import { WhatsappOtpService } from './whatsappOtpService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import { SuperadminService } from './superadminService';
@@ -750,13 +751,13 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       },
       solicitud.modelo
     )
-      .then(async ({ trackingNumber, labelUrl, simulado }) => {
+      .then(async ({ trackingNumber, labelUrl, carrier, simulado }) => {
         if (simulado) {
           console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
         }
         // No se toca el estatus acá: lo mueve el admin a mano (Preparando paquete ->
         // Pendiente de envío -> Enviado). Esto solo guarda la guía.
-        await PersistenceService.guardarEnvio(id, { tracking_number: trackingNumber, label_url: labelUrl });
+        await PersistenceService.guardarEnvio(id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier });
         console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${id}: ${trackingNumber}`);
       })
       .catch((skydropxError: any) => {
@@ -1273,6 +1274,18 @@ app.post('/api/admin/cobros-semanales/procesar', requireAdminAuth, async (req: R
   }
 });
 
+// POST: dispara el mismo chequeo de entregas que corre solo por cron (ver más abajo),
+// para poder probarlo sin esperar al horario programado.
+app.post('/api/admin/entregas/procesar', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const resultado = await EntregasService.procesarPendientes();
+    return res.status(200).json({ success: true, ...resultado });
+  } catch (error: any) {
+    console.error('Error al procesar entregas:', error.message);
+    return res.status(500).json({ error: error.message || 'No se pudieron procesar las entregas.' });
+  }
+});
+
 // Cron diario (9am hora de Ciudad de México) que manda los recordatorios/vouchers de
 // pago semanal pendientes por WhatsApp a quienes pagaron el enganche con OXXO/SPEI —
 // ver cobrosSemanalesService.ts (SPEI reenvía la misma CLABE, OXXO genera un voucher
@@ -1298,6 +1311,18 @@ cron.schedule('0 4 * * *', () => {
     .catch((error) => {
       console.error('[Cron] Error al borrar códigos OTP expirados:', error.message);
     });
+}, { timezone: 'America/Mexico_City' });
+
+// Cron diario (11am hora de Ciudad de México, después del de cobros semanales) que
+// revisa el tracking de Skydropx de cada solicitud "Enviado" y, si ya figura como
+// entregada, pasa el estatus a "Entregado" y avisa al cliente por WhatsApp — ver
+// entregasService.ts. Polling en vez de webhook: no se confirmó si Skydropx Pro
+// soporta webhooks de entrega para esta cuenta (ver conversación 2026-08-14).
+cron.schedule('0 11 * * *', () => {
+  console.log('[Cron] Revisando entregas pendientes de confirmar...');
+  EntregasService.procesarPendientes().catch((error) => {
+    console.error('[Cron] Error al procesar entregas:', error.message);
+  });
 }, { timezone: 'America/Mexico_City' });
 
 // Iniciar servidor

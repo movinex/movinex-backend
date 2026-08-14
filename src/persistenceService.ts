@@ -393,10 +393,38 @@ export class PersistenceService {
 
   // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el
   // estatus lo mueve el admin a mano (o el webhook de pago), no la generación de la guía.
-  static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null }) {
+  static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null; skydropx_carrier?: string }) {
     const { data, error } = await supabase
       .from('solicitudes')
       .update(datos)
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Solicitudes ya marcadas "Enviado" con guía de Skydropx generada — candidatas para
+  // que el cron de verificación de entregas (entregasService.ts) consulte su tracking.
+  static async getSolicitudesEnviadasConTracking() {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .eq('estatus', 'Enviado')
+      .not('tracking_number', 'is', null)
+      .not('skydropx_carrier', 'is', null);
+
+    if (error) throw error;
+    return data;
+  }
+
+  // Pasa la solicitud a "Entregado" una vez que Skydropx confirma la entrega. No pisa
+  // nada más (dirección, guía, etc.) — solo el estatus, igual que el resto de las
+  // transiciones de estatus manuales del admin.
+  static async marcarEntregado(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ estatus: 'Entregado' })
       .eq('id', id)
       .select();
 
