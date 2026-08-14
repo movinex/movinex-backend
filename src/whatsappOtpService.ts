@@ -20,15 +20,21 @@ export class WhatsappOtpService {
     return String(Math.floor(100000 + Math.random() * 900000));
   }
 
+  // Número del equipo para probar desde Argentina. El formulario solo acepta celulares
+  // mexicanos de 10 dígitos, y este también tiene 10, así que se reconoce acá para
+  // mandarle el OTP con el código de país argentino en vez de +52.
+  private static TELEFONO_PRUEBA_AR = '3442484515';
+
   /**
    * Arma el número en el formato que espera la API de WhatsApp (código de país +
-   * número, sin signos). Los clientes reales son mexicanos y solo cargan su celular
-   * de 10 dígitos sin código de país, así que ese caso sigue asumiendo México (+52).
-   * Si el número ya trae más de 10 dígitos, se asume que el código de país ya viene
-   * incluido (ej. pruebas desde otros países) y se manda tal cual.
+   * número, sin signos). Los clientes son todos mexicanos y cargan su celular de 10
+   * dígitos sin código de país, así que se les antepone +52.
    */
   private static formatearNumero(celular: string): string {
     const soloDigitos = celular.replace(/\D/g, '');
+    if (soloDigitos === this.TELEFONO_PRUEBA_AR) {
+      return `54${soloDigitos}`;
+    }
     return soloDigitos.length === 10 ? `52${soloDigitos}` : soloDigitos;
   }
 
