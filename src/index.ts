@@ -27,8 +27,13 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const STRIPE_WEBHOOK_SECRET_TEST = process.env.STRIPE_WEBHOOK_SECRET_TEST || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
-// Indicar a Express que confíe en los proxies (necesario en Railway / Heroku para rateLimit)
-app.enable('trust proxy');
+// Railway pone un único proxy delante de la app, así que se confía solo en el primer
+// salto. `app.enable('trust proxy')` (confiar en todos) hacía que req.ip saliera de un
+// X-Forwarded-For que cualquiera puede escribir a mano: bastaba con cambiar esa cabecera
+// en cada intento para que el rate limit nunca contara dos veces la misma IP, dejando
+// el login del panel abierto a fuerza bruta. Es lo que express-rate-limit venía
+// advirtiendo en los logs con ERR_ERL_PERMISSIVE_TRUST_PROXY.
+app.set('trust proxy', 1);
 
 // DDoS Protection: Limitador de tasa (Rate Limiting)
 const apiLimiter = rateLimit({
@@ -43,6 +48,23 @@ const apiLimiter = rateLimit({
   message: {
     success: false,
     message: 'Demasiadas solicitudes desde esta IP, por favor intenta de nuevo en 15 minutos.'
+  }
+});
+
+// Límite propio y mucho más estricto para el login del panel: el global de 500 está
+// pensado para el flujo de compra (un cliente consume ~15 requests), pero aplicado a un
+// login son 500 intentos de contraseña por ventana. Acá cuentan solo los intentos
+// fallidos (skipSuccessfulRequests), así que un admin que entra bien nunca se topa con
+// el límite, y quien prueba contraseñas se queda sin margen enseguida.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Demasiados intentos de inicio de sesión. Espera 15 minutos e intenta de nuevo.'
   }
 });
 
@@ -865,7 +887,7 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
 });
 
 // POST: Login para Super Administradores
-app.post('/api/admin/login', async (req: Request, res: Response) => {
+app.post('/api/admin/login', loginLimiter, async (req: Request, res: Response) => {
   try {
     const { usuario, clave } = req.body;
     if (!usuario || !clave) {
@@ -874,8 +896,14 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
 
     const authResult = await SuperadminService.login(usuario, clave);
     if (!authResult.success) {
+      // Se registra la IP de origen para poder distinguir a un admin que se equivocó de
+      // tecla de alguien probando contraseñas desde afuera. Sin esto, el log solo decía
+      // "Contraseña incorrecta" y no había forma de investigar (caso real: 2026-08-16).
+      console.warn(`[Login] Intento fallido para "${usuario}" desde IP ${req.ip}`);
       return res.status(401).json(authResult);
     }
+
+    console.log(`[Login] Acceso concedido a "${usuario}" desde IP ${req.ip}`);
 
     return res.status(200).json(authResult);
   } catch (error: any) {
