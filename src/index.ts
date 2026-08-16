@@ -102,6 +102,22 @@ app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// TEMPORAL (2026-08-16): sirve para medir cuántos proxies pone Railway delante de la
+// app y así configurar `trust proxy` con el número correcto. Solo devuelve datos de la
+// propia petición de quien llama (su cadena X-Forwarded-For), no expone nada de otros
+// usuarios ni del servidor. ELIMINAR en cuanto se determine el valor.
+app.get('/api/debug/ip', (req: Request, res: Response) => {
+  res.status(200).json({
+    reqIp: req.ip,
+    reqIps: req.ips,
+    xForwardedFor: req.headers['x-forwarded-for'] || null,
+    trustProxySetting: app.get('trust proxy'),
+    otrasCabecerasDeIp: Object.fromEntries(
+      Object.entries(req.headers).filter(([k]) => /forwarded|real-ip|client-ip|envoy/i.test(k))
+    )
+  });
+});
+
 // GET: Playground interactivo para simular cobro de enganches
 app.get('/playground', (req: Request, res: Response) => {
   res.send(`
