@@ -1,13 +1,15 @@
 import axios from 'axios';
 
 export class SkydropxService {
-  // El sandbox (sb-pro.skydropx.com) se eliminó el 2026-08-16: ya no había forma de
-  // llegar a él salvo con una solicitud de prueba vieja, y cuando el cron de entregas
-  // lo consultaba devolvía una página HTML en vez de JSON, que terminaba volcada
-  // entera en los logs de producción.
-  private static BASE_URL = process.env.SKYDROPX_PROD_BASE_URL || 'https://api-pro.skydropx.com';
-  private static CLIENT_ID = process.env.SKYDROPX_PROD_CLIENT_ID;
-  private static CLIENT_SECRET = process.env.SKYDROPX_PROD_CLIENT_SECRET;
+  private static BASE_URL = process.env.SKYDROPX_BASE_URL || 'https://sb-pro.skydropx.com';
+  private static CLIENT_ID = process.env.SKYDROPX_CLIENT_ID;
+  private static CLIENT_SECRET = process.env.SKYDROPX_CLIENT_SECRET;
+
+  // Igual que Verificamex: si el email de la solicitud contiene "real", se usa la
+  // API de producción de Skydropx en vez del sandbox.
+  private static PROD_BASE_URL = process.env.SKYDROPX_PROD_BASE_URL || 'https://api-pro.skydropx.com';
+  private static PROD_CLIENT_ID = process.env.SKYDROPX_PROD_CLIENT_ID;
+  private static PROD_CLIENT_SECRET = process.env.SKYDROPX_PROD_CLIENT_SECRET;
 
   private static REMITENTE_DEFAULT = {
     name: 'NVX Technologies',
@@ -29,32 +31,48 @@ export class SkydropxService {
   // Código de embalaje (catálogo SAT/UN, Rec. 21) para caja de cartón.
   private static PACKAGE_TYPE_CAJA = '4G';
 
-  private static tokenCache: { token: string; expiresAt: number } | null = null;
+  // Cachés separados para sandbox y producción: son cuentas/tokens distintos.
+  private static tokenCacheSandbox: { token: string; expiresAt: number } | null = null;
+  private static tokenCacheProd: { token: string; expiresAt: number } | null = null;
 
   // El token OAuth2 dura 2 horas (confirmado con la cuenta real); se cachea en memoria
   // y se renueva solo cuando falta poco para vencer.
-  private static async getAccessToken(): Promise<string> {
-    if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 30_000) {
-      return this.tokenCache.token;
+  private static async getAccessToken(usarProduccion: boolean): Promise<string> {
+    const cache = usarProduccion ? this.tokenCacheProd : this.tokenCacheSandbox;
+    if (cache && cache.expiresAt > Date.now() + 30_000) {
+      return cache.token;
     }
 
-    if (!this.CLIENT_ID || !this.CLIENT_SECRET) {
-      throw new Error('SKYDROPX_PROD_CLIENT_ID / SKYDROPX_PROD_CLIENT_SECRET no están configurados.');
+    const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+    const clientId = usarProduccion ? this.PROD_CLIENT_ID : this.CLIENT_ID;
+    const clientSecret = usarProduccion ? this.PROD_CLIENT_SECRET : this.CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        usarProduccion
+          ? 'SKYDROPX_PROD_CLIENT_ID / SKYDROPX_PROD_CLIENT_SECRET no están configurados.'
+          : 'SKYDROPX_CLIENT_ID / SKYDROPX_CLIENT_SECRET no están configurados.'
+      );
     }
 
-    const response = await axios.post(`${this.BASE_URL}/api/v1/oauth/token`, {
-      client_id: this.CLIENT_ID,
-      client_secret: this.CLIENT_SECRET,
+    const response = await axios.post(`${baseUrl}/api/v1/oauth/token`, {
+      client_id: clientId,
+      client_secret: clientSecret,
       grant_type: 'client_credentials'
     });
 
     const { access_token, expires_in } = response.data;
-    this.tokenCache = { token: access_token, expiresAt: Date.now() + expires_in * 1000 };
+    const nuevoCache = { token: access_token, expiresAt: Date.now() + expires_in * 1000 };
+    if (usarProduccion) {
+      this.tokenCacheProd = nuevoCache;
+    } else {
+      this.tokenCacheSandbox = nuevoCache;
+    }
     return access_token;
   }
 
-  private static async authHeaders() {
-    const token = await this.getAccessToken();
+  private static async authHeaders(usarProduccion: boolean) {
+    const token = await this.getAccessToken(usarProduccion);
     return { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } };
   }
 
@@ -77,8 +95,9 @@ export class SkydropxService {
   }
 
   /**
-   * Genera una guía real con Skydropx Pro (OAuth2), siempre contra la cuenta de
-   * producción (SKYDROPX_PROD_*) — el sandbox se eliminó el 2026-08-16.
+   * Genera una guía real con Skydropx Pro (OAuth2). Go-live (2026-08-10): por default
+   * usa producción (SKYDROPX_PROD_*) — solo el email exacto desarrollo@movinex.mx cae
+   * a sandbox (sb-pro.skydropx.com), igual que Stripe y Verificamex.
    * Flujo de 3 pasos, los dos primeros son asíncronos del lado de Skydropx:
    *   1. POST /quotations -> se espera a que is_completed sea true (poll).
    *   2. Se elige la tarifa más barata entre las que devolvieron success: true.
@@ -101,6 +120,9 @@ export class SkydropxService {
     modelo: string
   ): Promise<{ trackingNumber: string; labelUrl: string | null; carrier?: string; simulado?: boolean; rawData?: any }> {
     try {
+      const usarProduccion = email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
+      const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+
       const telefonoLimpio = telefono.replace(/\D/g, '');
 
       const addressTo = {
@@ -121,12 +143,12 @@ export class SkydropxService {
         reference: 'Paquete Movinex'
       };
 
-      const auth = await this.authHeaders();
+      const auth = await this.authHeaders(usarProduccion);
 
       // 1. Cotizar (asíncrono del lado de Skydropx)
-      console.log(`[Skydropx] Cotizando envío para ${cliente} a CP ${domicilio.codigoPostal}...`);
+      console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Cotizando envío para ${cliente} a CP ${domicilio.codigoPostal}...`);
       const cotizacionRes = await axios.post(
-        `${this.BASE_URL}/api/v1/quotations`,
+        `${baseUrl}/api/v1/quotations`,
         {
           quotation: {
             address_from: this.REMITENTE_DEFAULT,
@@ -141,7 +163,7 @@ export class SkydropxService {
       let quotation = cotizacionRes.data;
       for (let intento = 0; intento < 8 && !quotation.is_completed; intento++) {
         await this.esperar(2000);
-        const poll = await axios.get(`${this.BASE_URL}/api/v1/quotations/${quotationId}`, auth);
+        const poll = await axios.get(`${baseUrl}/api/v1/quotations/${quotationId}`, auth);
         quotation = poll.data;
       }
 
@@ -156,7 +178,7 @@ export class SkydropxService {
 
       // 3. Crear el envío con esa tarifa (también asíncrono)
       const shipmentRes = await axios.post(
-        `${this.BASE_URL}/api/v1/shipments`,
+        `${baseUrl}/api/v1/shipments`,
         {
           shipment: {
             quotation_id: quotationId,
@@ -185,7 +207,7 @@ export class SkydropxService {
         const estado = shipmentData.data.attributes.workflow_status;
         if (estado === 'success' || estado === 'failure') break;
         await this.esperar(2000);
-        const poll = await axios.get(`${this.BASE_URL}/api/v1/shipments/${shipmentId}`, auth);
+        const poll = await axios.get(`${baseUrl}/api/v1/shipments/${shipmentId}`, auth);
         shipmentData = poll.data;
       }
 
@@ -201,7 +223,7 @@ export class SkydropxService {
         throw new Error('Skydropx no devolvió un número de rastreo para la guía generada.');
       }
 
-      console.log(`[Skydropx] Guía generada con éxito. Tracking:`, trackingNumber);
+      console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Guía generada con éxito. Tracking:`, trackingNumber);
       // Se guarda para poder consultar el estado de entrega después (ver
       // consultarEstadoEntrega) — el endpoint de tracking de Skydropx pide el nombre
       // del carrier además del número de guía.
@@ -231,12 +253,14 @@ export class SkydropxService {
    */
   static async consultarEstadoEntrega(
     trackingNumber: string,
-    carrier: string
+    carrier: string,
+    usarProduccion: boolean
   ): Promise<{ status: string; entregado: boolean; rawData?: any }> {
-    const auth = await this.authHeaders();
+    const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+    const auth = await this.authHeaders(usarProduccion);
 
     const response = await axios.get(
-      `${this.BASE_URL}/api/v1/shipments/tracking/${encodeURIComponent(trackingNumber)}/${encodeURIComponent(carrier)}`,
+      `${baseUrl}/api/v1/shipments/tracking/${encodeURIComponent(trackingNumber)}/${encodeURIComponent(carrier)}`,
       auth
     );
 

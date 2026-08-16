@@ -23,14 +23,12 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10500;
 const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const STRIPE_WEBHOOK_SECRET_TEST = process.env.STRIPE_WEBHOOK_SECRET_TEST || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
-// Railway pone un único proxy delante de la app, así que se confía solo en el primer
-// salto. `app.enable('trust proxy')` (confiar en todos) dejaba que cualquiera mandara
-// un X-Forwarded-For falso y se saltara el rate limit — por ejemplo para probar
-// códigos OTP sin tope. express-rate-limit lo venía advirtiendo en los logs con
-// ERR_ERL_PERMISSIVE_TRUST_PROXY.
-app.set('trust proxy', 1);
+// Indicar a Express que confíe en los proxies (necesario en Railway / Heroku para rateLimit)
+app.enable('trust proxy');
 
 // DDoS Protection: Limitador de tasa (Rate Limiting)
 const apiLimiter = rateLimit({
@@ -327,13 +325,13 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
     // 1b. Realizar la validación biométrica facial (INE vs Selfie) real usando Verificamex
     let biometricResult = { valido: true, score: 1 };
     if (req.body.ine_frente && req.body.selfie) {
-      biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie);
+      biometricResult = await VerificamexService.validarIdentidadBiometrica(req.body.ine_frente, req.body.selfie, email);
     }
 
     // 1c. Leer nombre y CURP reales del frente del INE por OCR (Verificamex)
     let ocrCompleto = true; // en modo mock (sin email "real") no exigimos OCR — ver abajo
     if (req.body.ine_frente) {
-      const datosIne = await VerificamexService.leerDatosINE(req.body.ine_frente);
+      const datosIne = await VerificamexService.leerDatosINE(req.body.ine_frente, email);
       if (datosIne.nombre) cliente = datosIne.nombre;
       curp = datosIne.curp;
       // Si la llamada fue real (no simulada) y no devolvió nombre y CURP, la foto salió
@@ -500,7 +498,7 @@ app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) =
         const camposVerificacion: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
 
         if (ine_frente) {
-          const datosIne = await VerificamexService.leerDatosINE(ine_frente);
+          const datosIne = await VerificamexService.leerDatosINE(ine_frente, emailActual);
           if (datosIne.nombre) camposVerificacion.cliente = datosIne.nombre;
           camposVerificacion.curp = datosIne.curp;
           // En modo mock (sin email "real") no se exige — ver el mismo criterio en /finalizar.
@@ -510,7 +508,7 @@ app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) =
         const frenteB64 = ine_frente || (solicitud.ine_frente ? await PersistenceService.descargarDocumentoKYC(solicitud.ine_frente) : null);
         const selfieB64 = selfie || (solicitud.selfie ? await PersistenceService.descargarDocumentoKYC(solicitud.selfie) : null);
         if (frenteB64 && selfieB64) {
-          const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64);
+          const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, emailActual);
           camposVerificacion.biometrico_ok = biometricResult.valido;
         }
 
@@ -561,11 +559,11 @@ app.post('/api/solicitudes/:id/finalizar', async (req: Request, res: Response) =
         PersistenceService.descargarDocumentoKYC(solicitud.ine_frente),
         PersistenceService.descargarDocumentoKYC(solicitud.selfie)
       ]);
-      const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64);
+      const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, solicitud.email);
       biometricoOkRaw = biometricResult.valido;
 
       if (ocrOkRaw === null) {
-        const datosIne = await VerificamexService.leerDatosINE(frenteB64);
+        const datosIne = await VerificamexService.leerDatosINE(frenteB64, solicitud.email);
         if (datosIne.nombre) cliente = datosIne.nombre;
         curp = datosIne.curp;
         ocrOkRaw = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
@@ -1029,13 +1027,19 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
   let event;
   try {
-    event = StripeService.construirEventoWebhook(req.body as Buffer, signature);
+    if (!STRIPE_WEBHOOK_SECRET && !STRIPE_WEBHOOK_SECRET_TEST) {
+      throw new Error('STRIPE_WEBHOOK_SECRET / STRIPE_WEBHOOK_SECRET_TEST no están configurados en el servidor.');
+    }
+    event = StripeService.construirEventoWebhook(req.body as Buffer, signature, [STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_TEST]);
   } catch (err: any) {
     console.warn('[Stripe Webhook] Firma inválida o no verificable:', err.message);
     return res.status(401).json({ error: 'Firma de webhook inválida' });
   }
 
-  console.log(`[Stripe Webhook] Evento recibido y verificado: ${event.type}`);
+  // El evento trae livemode (true = cuenta real, false = modo de prueba) — se usa
+  // para llamar de vuelta a Stripe con el cliente correcto (ver StripeService.usaProduccion).
+  const usarProduccion = event.livemode;
+  console.log(`[Stripe Webhook] Evento recibido y verificado: ${event.type} (${usarProduccion ? 'LIVE' : 'test'})`);
 
   try {
     // Tarjeta cobra síncrono: checkout.session.completed ya trae payment_status "paid".
@@ -1095,7 +1099,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       //   semana (ver cobrosSemanalesService.ts → procesarPendientesOxxo).
       if (customerId && paymentIntentId) {
         try {
-          const { paymentMethodId, tipo, receiptUrl } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId);
+          const { paymentMethodId, tipo, receiptUrl } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
           await PersistenceService.guardarMetodoPagoEnganche(solicitud.id, tipo);
           if (receiptUrl) {
             await PersistenceService.guardarReciboPago(solicitud.id, receiptUrl);
@@ -1116,12 +1120,13 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
             console.log(`[Stripe Webhook] La solicitud ${solicitud.id} pagó el enganche con OXXO — cobro semanal por voucher nuevo cada semana, sin Subscription.`);
           } else if (tipo === 'customer_balance') {
-            const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId);
+            const { clabe } = await StripeService.crearReferenciaPagoPersistente(customerId, usarProduccion);
             const { subscriptionId } = await StripeService.crearSuscripcionConSaldo(
               solicitud.id,
               customerId,
               Number(solicitud.pago_semanal),
-              Number(solicitud.semanas)
+              Number(solicitud.semanas),
+              usarProduccion
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
             await PersistenceService.guardarReferenciaPagoPersistente(solicitud.id, clabe);
@@ -1149,14 +1154,15 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
               `CLABE persistente ${clabe} asignada, suscripción ${subscriptionId} armada (send_invoice).`
             );
           } else {
-            await StripeService.fijarMetodoPagoDefault(customerId, paymentMethodId);
+            await StripeService.fijarMetodoPagoDefault(customerId, paymentMethodId, usarProduccion);
 
             const { subscriptionId } = await StripeService.crearSuscripcionSemanal(
               solicitud.id,
               customerId,
               paymentMethodId,
               Number(solicitud.pago_semanal),
-              Number(solicitud.semanas)
+              Number(solicitud.semanas),
+              usarProduccion
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
             console.log(`[Stripe Webhook] Suscripción semanal ${subscriptionId} creada para la solicitud ${solicitud.id}.`);
@@ -1213,7 +1219,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         try {
           const solicitudCompleta = await PersistenceService.getSolicitudById(solicitudId);
           if (solicitudCompleta?.stripe_subscription_id) {
-            await StripeService.cancelarSuscripcion(solicitudCompleta.stripe_subscription_id);
+            await StripeService.cancelarSuscripcion(solicitudCompleta.stripe_subscription_id, usarProduccion);
             console.log(`[Stripe Webhook] Plan completo (${resultado.semanas_pagadas}/${resultado.semanas}) — Subscription ${solicitudCompleta.stripe_subscription_id} cancelada para la solicitud ${solicitudId}.`);
           } else {
             console.warn(`[Stripe Webhook] Plan completo para la solicitud ${solicitudId} pero no hay stripe_subscription_id guardado — no se pudo cancelar.`);

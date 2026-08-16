@@ -9,31 +9,58 @@ export class VerificamexService {
   // No valida contra el catálogo real de claves de estado, solo la forma general.
   private static CURP_REGEX = /^[A-Z]{4}\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[HM][A-Z]{5}[A-Z0-9]\d$/;
 
-  /**
-   * La validación de teléfono contra Verificamex nunca se llegó a conectar: siempre
-   * aprueba. Se mantiene el método porque `esSolicitudValida` lo consulta como uno de
-   * los tres factores y así queda el lugar donde enchufar la API real el día que se
-   * contrate.
-   *
-   * Hasta el 2026-08-16 tenía además dos atajos de prueba por sufijo del número:
-   * terminado en "99" se rechazaba y en "88" se aprobaba. Eso no era una simulación
-   * inofensiva — cualquier cliente real con un celular terminado en 99 (1 de cada 100)
-   * quedaba fuera de la aprobación automática sin razón. Eliminados junto con el resto
-   * del entorno de prueba.
-   */
   static async validarTelefono(numeroTelefono: string): Promise<{ valido: boolean; estatus: string; rawData: any }> {
-    console.log(`[Verificamex] Validación de teléfono no conectada, se aprueba por default: ${numeroTelefono}`);
-    return {
-      valido: true,
-      estatus: 'APPROVED',
-      rawData: { sinConectar: true }
-    };
-  }
+    if (numeroTelefono.endsWith('99')) {
+      console.log(`[Verificamex MOCK] Simulando RECHAZO local para el teléfono: ${numeroTelefono}`);
+      return {
+        valido: false,
+        estatus: 'REJECTED',
+        rawData: { mock: true, testStatus: 'REJECTED' }
+      };
+    } else if (numeroTelefono.endsWith('88')) {
+      console.log(`[Verificamex MOCK] Simulando APROBACIÓN local para el teléfono: ${numeroTelefono}`);
+      return {
+        valido: true,
+        estatus: 'APPROVED',
+        rawData: { mock: true, testStatus: 'APPROVED' }
+      };
+    }
 
-  static async leerDatosINE(ineFrontBase64: string): Promise<{ nombre: string | null; curp: string | null; rawData: any }> {
     try {
       if (!this.API_KEY) {
-        console.log('[Verificamex MOCK] Omitiendo lectura OCR del INE (falta VERIFICAMEX_API_KEY).');
+        console.warn('[Verificamex] VERIFICAMEX_API_KEY no configurado.');
+        return {
+          valido: true,
+          estatus: 'APPROVED',
+          rawData: { mock: true }
+        };
+      }
+
+      console.log(`[Verificamex] Omitiendo llamada real a validación de teléfono para: ${numeroTelefono}`);
+      return {
+        valido: true,
+        estatus: 'APPROVED',
+        rawData: { detail: 'Simulado exitoso.' }
+      };
+
+    } catch (error: any) {
+      console.error('[Verificamex] Error al validar el teléfono:', error.response?.data || error.message);
+      return {
+        valido: true, 
+        estatus: 'APPROVED',
+        rawData: { error: true, message: error.message }
+      };
+    }
+  }
+
+  static async leerDatosINE(ineFrontBase64: string, emailCliente?: string): Promise<{ nombre: string | null; curp: string | null; rawData: any }> {
+    try {
+      // Go-live (2026-08-10): producción por default, salvo el email exacto
+      // desarrollo@movinex.mx (equipo interno) — igual que Stripe y Skydropx.
+      const usarProduccion = emailCliente?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
+
+      if (!this.API_KEY || !usarProduccion) {
+        console.log('[Verificamex MOCK] Omitiendo lectura OCR del INE (Simulado).');
         return { nombre: null, curp: null, rawData: { mock: true } };
       }
 
@@ -91,10 +118,12 @@ export class VerificamexService {
    * problema de nuestro payload — coincide exacto con la doc de Verificamex). Reportarlo
    * a su soporte; mientras tanto quedamos con isMatch sin score ni umbral configurable.
    */
-  static async validarIdentidadBiometrica(ineFrontBase64: string, selfieBase64: string): Promise<{ valido: boolean; score: number; rawData: any }> {
+  static async validarIdentidadBiometrica(ineFrontBase64: string, selfieBase64: string, emailCliente?: string): Promise<{ valido: boolean; score: number; rawData: any }> {
     try {
-      if (!this.API_KEY) {
-        console.log(`[Verificamex MOCK] Aprobando biométrico localmente (falta VERIFICAMEX_API_KEY).`);
+      const usarProduccion = emailCliente?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
+
+      if (!this.API_KEY || !usarProduccion) {
+        console.log(`[Verificamex MOCK] Aprobando biométrico localmente (Simulado).`);
         return {
           valido: true,
           score: 0.95,
