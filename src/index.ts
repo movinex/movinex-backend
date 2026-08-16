@@ -27,13 +27,18 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const STRIPE_WEBHOOK_SECRET_TEST = process.env.STRIPE_WEBHOOK_SECRET_TEST || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
 
-// Railway pone un único proxy delante de la app, así que se confía solo en el primer
-// salto. `app.enable('trust proxy')` (confiar en todos) hacía que req.ip saliera de un
-// X-Forwarded-For que cualquiera puede escribir a mano: bastaba con cambiar esa cabecera
-// en cada intento para que el rate limit nunca contara dos veces la misma IP, dejando
-// el login del panel abierto a fuerza bruta. Es lo que express-rate-limit venía
-// advirtiendo en los logs con ERR_ERL_PERMISSIVE_TRUST_PROXY.
-app.set('trust proxy', 1);
+// Medido contra Railway el 2026-08-16 (no asumido): la cadena que llega a la app es
+// siempre `X-Forwarded-For: <IP real del cliente>, <IP interna de Railway>` — dos
+// saltos — y Railway **descarta** el X-Forwarded-For que mande el cliente antes de
+// armarla (se probó enviando uno falso: nunca aparece). O sea que acá la IP no se
+// puede falsificar, y por eso hay que saltear 2 hops para quedarse con la del cliente.
+//
+// Con `1` se tomaba la IP interna de Railway, que **rota** entre .193 y .194: el rate
+// limit contaba cada IP por separado y hacía falta el doble de intentos para bloquear,
+// además de registrar en el log una IP inútil para investigar. Con `enable('trust
+// proxy')` (confiar en todos) la IP salía bien, pero express-rate-limit lo marcaba como
+// inseguro (ERR_ERL_PERMISSIVE_TRUST_PROXY) porque en otro hosting sí sería falsificable.
+app.set('trust proxy', 2);
 
 // DDoS Protection: Limitador de tasa (Rate Limiting)
 const apiLimiter = rateLimit({
@@ -100,22 +105,6 @@ app.use((req: Request, res: Response, next) => {
 // Endpoint de verificación de salud
 app.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
-
-// TEMPORAL (2026-08-16): sirve para medir cuántos proxies pone Railway delante de la
-// app y así configurar `trust proxy` con el número correcto. Solo devuelve datos de la
-// propia petición de quien llama (su cadena X-Forwarded-For), no expone nada de otros
-// usuarios ni del servidor. ELIMINAR en cuanto se determine el valor.
-app.get('/api/debug/ip', (req: Request, res: Response) => {
-  res.status(200).json({
-    reqIp: req.ip,
-    reqIps: req.ips,
-    xForwardedFor: req.headers['x-forwarded-for'] || null,
-    trustProxySetting: app.get('trust proxy'),
-    otrasCabecerasDeIp: Object.fromEntries(
-      Object.entries(req.headers).filter(([k]) => /forwarded|real-ip|client-ip|envoy/i.test(k))
-    )
-  });
 });
 
 // GET: Playground interactivo para simular cobro de enganches
