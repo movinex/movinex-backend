@@ -1,39 +1,21 @@
 import Stripe from 'stripe';
 
 export class StripeService {
-  private static _clientLive: Stripe | null = null;
-  private static _clientTest: Stripe | null = null;
+  private static _client: Stripe | null = null;
 
-  // Go-live (2026-08-10): por default se usan las llaves LIVE (cobran de verdad) —
-  // solo el email exacto desarrollo@movinex.mx (equipo interno, para seguir probando
-  // sin gastar) cae a las llaves de PRUEBA (STRIPE_SECRET_KEY_TEST). Antes era al
-  // revés (default prueba, "real" en el email pasaba a producción); se invirtió a
-  // propósito para que cualquier cliente real quede en modo real sin depender de que
-  // nadie escriba "real" en su email.
-  static usaProduccion(email?: string | null): boolean {
-    return email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
-  }
-
-  private static getClient(usarProduccion: boolean): Stripe {
-    if (usarProduccion) {
-      if (!this._clientLive) {
-        const apiKey = process.env.STRIPE_SECRET_KEY;
-        if (!apiKey) {
-          throw new Error('STRIPE_SECRET_KEY no está configurado en el servidor.');
-        }
-        this._clientLive = new Stripe(apiKey);
-      }
-      return this._clientLive;
-    }
-
-    if (!this._clientTest) {
-      const apiKey = process.env.STRIPE_SECRET_KEY_TEST;
+  // Las llaves de prueba se eliminaron el 2026-08-16: quedaba un único camino a modo
+  // test (el email exacto desarrollo@movinex.mx) que nadie usaba, y mantener dos
+  // clientes/dos secretos de webhook en paralelo agregaba riesgo al cobro real sin
+  // beneficio. Todo pasa por las llaves LIVE: cualquier cobro es dinero de verdad.
+  private static getClient(): Stripe {
+    if (!this._client) {
+      const apiKey = process.env.STRIPE_SECRET_KEY;
       if (!apiKey) {
-        throw new Error('STRIPE_SECRET_KEY_TEST no está configurado en el servidor.');
+        throw new Error('STRIPE_SECRET_KEY no está configurado en el servidor.');
       }
-      this._clientTest = new Stripe(apiKey);
+      this._client = new Stripe(apiKey);
     }
-    return this._clientTest;
+    return this._client;
   }
 
   /**
@@ -68,12 +50,11 @@ export class StripeService {
     cancelUrl: string,
     costoEnvio: number = 0
   ): Promise<{ sessionId: string; url: string }> {
-    const usarProduccion = this.usaProduccion(email);
-    const client = this.getClient(usarProduccion);
+    const client = this.getClient();
     const telefonoLimpio = telefono.replace(/\D/g, '');
     const telefonoFormateado = telefonoLimpio.startsWith('52') ? `+${telefonoLimpio}` : `+52${telefonoLimpio}`;
 
-    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN + $${costoEnvio} de envío (tarjeta/OXXO/SPEI, ${usarProduccion ? 'LIVE' : 'test'})`);
+    console.log(`[Stripe] Creando checkout session de enganche para ${cliente} por $${enganche} MXN + $${costoEnvio} de envío (tarjeta/OXXO/SPEI)`);
 
     const customer = await client.customers.create({ email, name: cliente });
 
@@ -136,8 +117,8 @@ export class StripeService {
    * puede armar la suscripción semanal automática (solo si es `card`, ver arriba) — y
    * el `receiptUrl` del recibo hosteado por Stripe (comprobante de pago para el admin).
    */
-  static async obtenerMetodoPagoDeIntent(paymentIntentId: string, usarProduccion: boolean): Promise<{ paymentMethodId: string; tipo: string; receiptUrl: string | null }> {
-    const paymentIntent = await this.getClient(usarProduccion).paymentIntents.retrieve(paymentIntentId, {
+  static async obtenerMetodoPagoDeIntent(paymentIntentId: string): Promise<{ paymentMethodId: string; tipo: string; receiptUrl: string | null }> {
+    const paymentIntent = await this.getClient().paymentIntents.retrieve(paymentIntentId, {
       expand: ['payment_method', 'latest_charge'],
     });
     const paymentMethod = paymentIntent.payment_method;
@@ -156,8 +137,8 @@ export class StripeService {
    * Deja la tarjeta usada en el pago del enganche como método de pago por default del
    * Customer, para poder cobrarla off-session en la suscripción semanal.
    */
-  static async fijarMetodoPagoDefault(customerId: string, paymentMethodId: string, usarProduccion: boolean): Promise<void> {
-    await this.getClient(usarProduccion).customers.update(customerId, {
+  static async fijarMetodoPagoDefault(customerId: string, paymentMethodId: string): Promise<void> {
+    await this.getClient().customers.update(customerId, {
       invoice_settings: { default_payment_method: paymentMethodId },
     });
   }
@@ -173,12 +154,11 @@ export class StripeService {
     customerId: string,
     paymentMethodId: string,
     pagoSemanal: number,
-    semanas: number,
-    usarProduccion: boolean
+    semanas: number
   ): Promise<{ subscriptionId: string }> {
     console.log(`[Stripe] Creando suscripción semanal de $${pagoSemanal} x ${semanas} semanas (trial 7 días) para ${customerId}`);
 
-    const client = this.getClient(usarProduccion);
+    const client = this.getClient();
 
     // A diferencia de Checkout Sessions, subscriptions.create no acepta product_data
     // inline — el Price tiene que apuntar a un Product ya creado.
@@ -221,8 +201,8 @@ export class StripeService {
    * `createFundingInstructions` es idempotente por customer+currency+tipo: llamarlo de
    * nuevo para el mismo customer devuelve la misma CLABE, no crea una nueva.
    */
-  static async crearReferenciaPagoPersistente(customerId: string, usarProduccion: boolean): Promise<{ clabe: string; banco: string }> {
-    const instrucciones = await this.getClient(usarProduccion).customers.createFundingInstructions(customerId, {
+  static async crearReferenciaPagoPersistente(customerId: string): Promise<{ clabe: string; banco: string }> {
+    const instrucciones = await this.getClient().customers.createFundingInstructions(customerId, {
       currency: 'mxn',
       funding_type: 'bank_transfer',
       bank_transfer: { type: 'mx_bank_transfer' },
@@ -252,12 +232,11 @@ export class StripeService {
     solicitudId: string,
     customerId: string,
     pagoSemanal: number,
-    semanas: number,
-    usarProduccion: boolean
+    semanas: number
   ): Promise<{ subscriptionId: string }> {
     console.log(`[Stripe] Creando suscripción (cobro por saldo/CLABE) de $${pagoSemanal} x ${semanas} semanas (trial 7 días) para ${customerId}`);
 
-    const client = this.getClient(usarProduccion);
+    const client = this.getClient();
 
     const product = await client.products.create({
       name: `Pago semanal Movinex - ${solicitudId}`,
@@ -300,12 +279,11 @@ export class StripeService {
     customerId: string,
     monto: number,
     numeroSemana: number,
-    origin: string,
-    usarProduccion: boolean
+    origin: string
   ): Promise<{ sessionId: string; url: string }> {
     console.log(`[Stripe] Creando voucher OXXO semana #${numeroSemana} por $${monto} MXN para ${customerId}`);
 
-    const session = await this.getClient(usarProduccion).checkout.sessions.create({
+    const session = await this.getClient().checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['oxxo'],
       customer: customerId,
@@ -344,27 +322,21 @@ export class StripeService {
    * confirmarse el pago de la última semana, así que no queda nada pendiente de
    * cobrar ni de prorratear.
    */
-  static async cancelarSuscripcion(subscriptionId: string, usarProduccion: boolean): Promise<void> {
-    await this.getClient(usarProduccion).subscriptions.cancel(subscriptionId);
+  static async cancelarSuscripcion(subscriptionId: string): Promise<void> {
+    await this.getClient().subscriptions.cancel(subscriptionId);
   }
 
   /**
    * Verifica la firma del webhook contra el signing secret del endpoint en Stripe.
-   * Como el evento puede venir del endpoint live o del de prueba (dos secretos
-   * distintos, ver `usaProduccion`), se prueban en orden hasta que uno verifique —
-   * `webhooks.constructEvent` es solo una verificación criptográfica local, no pega
-   * a la red, así que probar varios secretos es barato.
+   * Antes probaba dos secretos (live y prueba) porque el evento podía venir de
+   * cualquiera de los dos endpoints; al eliminarse el modo prueba (2026-08-16) queda
+   * solo el live. Fail-closed: sin secreto configurado, no se acepta nada.
    */
-  static construirEventoWebhook(rawBody: Buffer, signature: string, webhookSecrets: (string | undefined)[]): Stripe.Event {
-    let ultimoError: unknown;
-    for (const secret of webhookSecrets) {
-      if (!secret) continue;
-      try {
-        return this.getClient(true).webhooks.constructEvent(rawBody, signature, secret);
-      } catch (err) {
-        ultimoError = err;
-      }
+  static construirEventoWebhook(rawBody: Buffer, signature: string): Stripe.Event {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secret) {
+      throw new Error('STRIPE_WEBHOOK_SECRET no está configurado en el servidor.');
     }
-    throw ultimoError instanceof Error ? ultimoError : new Error('No se pudo verificar la firma del webhook.');
+    return this.getClient().webhooks.constructEvent(rawBody, signature, secret);
   }
 }

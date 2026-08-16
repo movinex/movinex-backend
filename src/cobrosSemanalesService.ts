@@ -77,14 +77,12 @@ export class CobrosSemanalesService {
           throw new Error('La solicitud no tiene un customer_id de Stripe guardado todavía.');
         }
 
-        const usarProduccion = StripeService.usaProduccion(solicitud.email);
         const { url } = await StripeService.crearPagoSemanalOxxo(
           solicitud.id,
           solicitud.stripe_customer_id,
           Number(solicitud.pago_semanal),
           numeroSemana,
-          origin,
-          usarProduccion
+          origin
         );
 
         await WhatsappOtpService.enviarLinkPagoSemanalOxxo(
