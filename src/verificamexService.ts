@@ -1,8 +1,13 @@
 import axios from 'axios';
+import { ImageQualityService } from './imageQualityService';
 
 export class VerificamexService {
   private static API_KEY = process.env.VERIFICAMEX_API_KEY;
   private static BASE_URL = 'https://api.verificamex.com/identity/v1';
+  // Formato oficial de CURP: 4 letras + fecha (AAMMDD) + sexo (H/M) + 2 letras de
+  // estado + 3 consonantes + homoclave + dígito verificador = 18 caracteres.
+  // No valida contra el catálogo real de claves de estado, solo la forma general.
+  private static CURP_REGEX = /^[A-Z]{4}\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[HM][A-Z]{5}[A-Z0-9]\d$/;
 
   static async validarTelefono(numeroTelefono: string): Promise<{ valido: boolean; estatus: string; rawData: any }> {
     if (numeroTelefono.endsWith('99')) {
@@ -59,6 +64,12 @@ export class VerificamexService {
         return { nombre: null, curp: null, rawData: { mock: true } };
       }
 
+      const calidad = await ImageQualityService.evaluarCalidad(ineFrontBase64);
+      if (!calidad.nitida) {
+        console.warn(`[Verificamex] Frente del INE rechazado por calidad de imagen (varianza=${calidad.varianza.toFixed(1)}, brillo=${calidad.brillo.toFixed(1)}) — se omite el OCR, no hay forma confiable de leerlo.`);
+        return { nombre: null, curp: null, rawData: { calidadInsuficiente: true, ...calidad } };
+      }
+
       console.log('[Verificamex] Solicitando lectura OCR del frente del INE...');
 
       const response = await axios.post(
@@ -82,9 +93,15 @@ export class VerificamexService {
       const apellidos = getCampo('Surname');
       const nombre = getCampo('FullName') || [nombrePila, apellidos].filter(Boolean).join(' ') || null;
 
+      const curpLeido = getCampo('PersonalNumber');
+      const curp = curpLeido && this.CURP_REGEX.test(curpLeido) ? curpLeido : null;
+      if (curpLeido && !curp) {
+        console.warn(`[Verificamex] CURP leído por OCR no tiene formato válido, se descarta: "${curpLeido}"`);
+      }
+
       return {
         nombre,
-        curp: getCampo('PersonalNumber'),
+        curp,
         rawData: response.data
       };
     } catch (error: any) {
@@ -111,6 +128,19 @@ export class VerificamexService {
           valido: true,
           score: 0.95,
           rawData: { mock: true, confidence: 0.95 }
+        };
+      }
+
+      const [calidadFrente, calidadSelfie] = await Promise.all([
+        ImageQualityService.evaluarCalidad(ineFrontBase64),
+        ImageQualityService.evaluarCalidad(selfieBase64)
+      ]);
+      if (!calidadFrente.nitida || !calidadSelfie.nitida) {
+        console.warn(`[Verificamex] Biométrico rechazado por calidad de imagen (INE nítida=${calidadFrente.nitida}, selfie nítida=${calidadSelfie.nitida}) — se omite la comparación facial.`);
+        return {
+          valido: false,
+          score: 0,
+          rawData: { calidadInsuficiente: true, calidadFrente, calidadSelfie }
         };
       }
 
