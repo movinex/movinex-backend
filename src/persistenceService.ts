@@ -542,7 +542,7 @@ export class PersistenceService {
 
   // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el
   // estatus lo mueve el admin a mano (o el webhook de pago), no la generación de la guía.
-  static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null; skydropx_carrier?: string }) {
+  static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null; skydropx_carrier?: string; skydropx_shipment_id?: string }) {
     const { data, error } = await supabase
       .from('solicitudes')
       .update(datos)

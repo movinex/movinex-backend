@@ -579,11 +579,11 @@ async function aprobarYActivarEnvio(solicitud: any) {
     },
     solicitud.modelo
   )
-    .then(async ({ trackingNumber, labelUrl, carrier, simulado }) => {
+    .then(async ({ trackingNumber, labelUrl, shipmentId, carrier, simulado }) => {
       if (simulado) {
         console.warn(`[Skydropx] Guía simulada para la solicitud ${solicitud.id} — la llamada real a Skydropx falló o no está configurada.`);
       }
-      await PersistenceService.guardarEnvio(solicitud.id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier });
+      await PersistenceService.guardarEnvio(solicitud.id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier, skydropx_shipment_id: shipmentId });
       console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${solicitud.id}: ${trackingNumber}`);
     })
     .catch((skydropxError: any) => {
@@ -959,6 +959,21 @@ app.post('/api/admin/solicitudes/:id/cancelar', requireAdminAuth, async (req: Re
       } catch (stripeError: any) {
         console.error(`[Cancelar] No se pudo reembolsar el pago de la solicitud ${id}: ${stripeError.message}`);
         return res.status(500).json({ error: 'No se pudo reembolsar el pago en Stripe — la solicitud NO se canceló. Revisa el dashboard de Stripe antes de reintentar.' });
+      }
+    }
+
+    // Best-effort, no bloquea la cancelación: lo que de verdad protege al cliente (dejar
+    // de cobrarle, devolverle el enganche) ya se resolvió arriba con Stripe. Si Skydropx
+    // no responde o el endpoint de cancelación no se comporta como documentado (todavía
+    // sin confirmar contra la cuenta real, ver skydropxService.ts), la solicitud igual
+    // se cancela y queda logueado para revisar la guía a mano.
+    if (solicitud.skydropx_shipment_id) {
+      try {
+        // Mismo criterio de email que Stripe (usarProduccion, ya calculado arriba) —
+        // Skydropx usa la misma regla desarrollo@movinex.mx → sandbox, cualquier otro → real.
+        await SkydropxService.cancelarEnvio(solicitud.skydropx_shipment_id, usarProduccion);
+      } catch (skydropxError: any) {
+        console.error(`[Cancelar] No se pudo cancelar la guía de Skydropx de la solicitud ${id} (shipment ${solicitud.skydropx_shipment_id}): ${skydropxError.message}`);
       }
     }
 

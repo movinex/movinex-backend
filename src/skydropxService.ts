@@ -118,7 +118,7 @@ export class SkydropxService {
       codigoPostal: string;
     },
     modelo: string
-  ): Promise<{ trackingNumber: string; labelUrl: string | null; carrier?: string; simulado?: boolean; rawData?: any }> {
+  ): Promise<{ trackingNumber: string; labelUrl: string | null; shipmentId?: string; carrier?: string; simulado?: boolean; rawData?: any }> {
     try {
       const usarProduccion = email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
       const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
@@ -224,10 +224,10 @@ export class SkydropxService {
       }
 
       console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Guía generada con éxito. Tracking:`, trackingNumber);
-      // Se guarda para poder consultar el estado de entrega después (ver
-      // consultarEstadoEntrega) — el endpoint de tracking de Skydropx pide el nombre
-      // del carrier además del número de guía.
-      return { trackingNumber, labelUrl, carrier: tarifaElegida.provider_display_name, rawData: shipmentData };
+      // shipmentId se guarda para poder cancelar la guía después (ver cancelarEnvio) si
+      // el admin cancela la solicitud — el endpoint de cancelación pide el id del envío,
+      // no el tracking_number. carrier se guarda para consultarEstadoEntrega.
+      return { trackingNumber, labelUrl, shipmentId: String(shipmentId), carrier: tarifaElegida.provider_display_name, rawData: shipmentData };
 
     } catch (error: any) {
       console.error('[Skydropx] Error al generar la guía de envío:', error.response?.data || error.message);
@@ -270,5 +270,23 @@ export class SkydropxService {
       entregado: this.ESTADOS_ENTREGADO.includes(status.toUpperCase()),
       rawData: response.data
     };
+  }
+
+  /**
+   * Cancela un envío ya generado (`POST /api/v1/shipments/:id/cancellations`) — lo usa
+   * el botón "Cancelar solicitud" del admin cuando la guía ya existía. **Sin confirmar
+   * contra la cuenta real todavía** (igual que el resto de este servicio, ver el resto
+   * de las notas de "sin confirmar" en este archivo): la documentación pública de
+   * Skydropx Pro solo confirma el método y la ruta, no el shape exacto de la respuesta
+   * ni si devuelve algún reembolso del costo de envío. Por eso el caller (index.ts) lo
+   * trata como best-effort — un error acá no debe impedir que se termine de cancelar la
+   * solicitud del lado de Movinex/Stripe, que es lo que de verdad protege al cliente.
+   */
+  static async cancelarEnvio(shipmentId: string, usarProduccion: boolean): Promise<void> {
+    const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
+    const auth = await this.authHeaders(usarProduccion);
+
+    await axios.post(`${baseUrl}/api/v1/shipments/${shipmentId}/cancellations`, {}, auth);
+    console.log(`[Skydropx${usarProduccion ? ' PRODUCCIÓN' : ''}] Envío ${shipmentId} cancelado.`);
   }
 }
