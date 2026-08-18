@@ -4,6 +4,7 @@ import { ImageQualityService } from './imageQualityService';
 export class VerificamexService {
   private static API_KEY = process.env.VERIFICAMEX_API_KEY;
   private static BASE_URL = 'https://api.verificamex.com/identity/v1';
+  private static BASE_URL_V2 = 'https://api.verificamex.com/identity/v2';
   // Formato oficial de CURP: 4 letras + fecha (AAMMDD) + sexo (H/M) + 2 letras de
   // estado + 3 consonantes + homoclave + dígito verificador = 18 caracteres.
   // No valida contra el catálogo real de claves de estado, solo la forma general.
@@ -189,6 +190,103 @@ export class VerificamexService {
         score: 0,
         rawData: { error: true, message: error.message }
       };
+    }
+  }
+
+  /**
+   * Crea una VerificationSession (`POST /identity/v2/identity/sessions`) — el flujo
+   * hosteado por Verificamex donde el cliente hace la captura de INE + prueba de vida
+   * real directamente en su página (`form_url`), sin subir archivos a nuestro backend.
+   * Reemplaza `leerDatosINE`/`validarIdentidadBiometrica` (fotos estáticas, arriba) para
+   * la verificación post-pago (paso 7 del flujo nuevo) — esos dos métodos quedan
+   * intactos sin llamarse desde ahí, mismo criterio que `conektaService.ts`.
+   *
+   * En modo mock (sin API key, o email exacto `desarrollo@movinex.mx`) no hay forma de
+   * simular una página hosteada real, así que se devuelve `mock: true` sin `formUrl` —
+   * el caller (index.ts) resuelve la sesión como aprobada al toque, sin redirigir a
+   * ningún lado externo.
+   *
+   * `VERIFICAMEX_FORCE_LIVE=true` (solo pensado para `.env` local, no para Railway)
+   * override para poder probar el flujo entero con `desarrollo@movinex.mx` — Stripe y
+   * Skydropx se quedan mockeados/sandbox como siempre, pero acá pega a la API real de
+   * Verificamex por un ciclo. Sacar la variable (o ponerla en false) para volver al mock.
+   */
+  static async crearSesionVerificacion(
+    solicitudId: string,
+    emailCliente: string | undefined,
+    redirectUrl: string,
+    webhookUrl: string
+  ): Promise<{ mock: boolean; sessionId: string | null; formUrl: string | null }> {
+    const usarProduccion = process.env.VERIFICAMEX_FORCE_LIVE === 'true'
+      || emailCliente?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
+
+    if (!this.API_KEY || !usarProduccion) {
+      console.log(`[Verificamex MOCK] Simulando VerificationSession aprobada para la solicitud ${solicitudId}.`);
+      return { mock: true, sessionId: `mock-${solicitudId}`, formUrl: null };
+    }
+
+    console.log(`[Verificamex] Creando VerificationSession para la solicitud ${solicitudId}...`);
+
+    const response = await axios.post(
+      `${this.BASE_URL_V2}/identity/sessions`,
+      {
+        validations: ['INE', 'CURP'],
+        redirect_url: redirectUrl,
+        webhook: webhookUrl,
+        with_webhook_binaries: false,
+        optionals: { solicitud_id: solicitudId }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${this.API_KEY}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+
+    const sesion = response.data?.data;
+    if (!sesion?.form_url || !sesion?.id) {
+      throw new Error('Verificamex no devolvió una sesión de verificación válida.');
+    }
+
+    console.log(`[Verificamex] VerificationSession ${sesion.id} creada para la solicitud ${solicitudId}.`);
+    return { mock: false, sessionId: sesion.id, formUrl: sesion.form_url };
+  }
+
+  /**
+   * Consulta el estado actual de una VerificationSession
+   * (`GET /identity/v2/identity/sessions/:id`). Es el **fallback del webhook**: si el
+   * webhook no llega (endpoint mal configurado, caída puntual, o directamente un entorno
+   * local al que Verificamex no puede alcanzar), esto permite enterarse igual del
+   * resultado preguntando en vez de esperar a que nos avisen.
+   *
+   * Devuelve `null` si no se pudo consultar — el caller trata eso como "todavía no se
+   * sabe" y reintenta después, nunca como un rechazo.
+   */
+  static async consultarSesion(sessionId: string): Promise<{ status: string; result: number | null; comments: string | null } | null> {
+    if (!this.API_KEY) return null;
+
+    try {
+      const response = await axios.get(
+        `${this.BASE_URL_V2}/identity/sessions/${sessionId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.API_KEY}`,
+            'Accept': 'application/json'
+          },
+          timeout: 15000
+        }
+      );
+
+      const sesion = response.data?.data;
+      if (!sesion?.status) return null;
+
+      return { status: sesion.status, result: sesion.result ?? null, comments: sesion.comments ?? null };
+    } catch (error: any) {
+      console.error(`[Verificamex] No se pudo consultar la sesión ${sessionId}:`, error.response?.data || error.message);
+      return null;
     }
   }
 }

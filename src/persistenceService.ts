@@ -99,10 +99,10 @@ export class PersistenceService {
     return data[0];
   }
 
-  // Se crea apenas se verifica el OTP (antes de pedir email/INE/selfie), para no
+  // Se crea apenas se verifica el OTP (antes de pedir datos/dirección), para no
   // perder el lead si el cliente se cae del formulario a mitad de camino — el resto
-  // de los campos se van completando después vía guardarProgresoSolicitud/
-  // finalizarSolicitud, sobre esta misma fila (no se vuelve a insertar).
+  // de los campos se van completando después vía guardarProgresoSolicitud y las demás
+  // rutas de cada paso, sobre esta misma fila (no se vuelve a insertar).
   static async crearSolicitudIniciada(datos: {
     celular: string;
     modelo: string;
@@ -132,45 +132,18 @@ export class PersistenceService {
     return data[0];
   }
 
-  // Guarda lo que el cliente va completando (email, y/o una o más fotos ya subidas al
-  // bucket privado) apenas está listo cada campo — no espera al submit final. Solo
-  // actualiza las claves presentes en `campos`.
-  static async guardarProgresoSolicitud(id: string, campos: Partial<{ email: string; ine_frente: string; ine_reverso: string; selfie: string; cliente: string; curp: string | null; ocr_ok: boolean; biometrico_ok: boolean }>) {
+  // Guarda lo que el cliente va completando (datos personales, email, y/o una o más
+  // fotos ya subidas al bucket privado) apenas está listo cada campo/paso — no espera
+  // al submit final. Solo actualiza las claves presentes en `campos`.
+  static async guardarProgresoSolicitud(id: string, campos: Partial<{
+    email: string; ine_frente: string; ine_reverso: string; selfie: string; cliente: string;
+    curp: string | null; ocr_ok: boolean; biometrico_ok: boolean;
+    nombre: string; apellidos: string; fecha_nacimiento: string; genero: string;
+    estado_civil: string; dependientes_economicos: number; nivel_estudios: string;
+  }>) {
     const { data, error } = await supabase
       .from('solicitudes')
       .update(campos)
-      .eq('id', id)
-      .select();
-
-    if (error) throw error;
-    return data[0];
-  }
-
-  // Cierra el ciclo: corre después de Verificamex (POST /:id/finalizar en index.ts),
-  // con el nombre/CURP leídos por OCR y el estatus ya decidido.
-  static async finalizarSolicitud(id: string, datos: {
-    cliente: string;
-    curp: string | null;
-    estatus: string;
-    acepta_terminos: boolean;
-    ocr_ok?: boolean | null;
-    biometrico_ok?: boolean | null;
-  }) {
-    const update: Record<string, any> = {
-      cliente: datos.cliente,
-      curp: datos.curp,
-      estatus: datos.estatus,
-      acepta_terminos: datos.acepta_terminos
-    };
-    // Solo se pisan si de verdad se recalcularon acá (index.ts corre el chequeo si
-    // llegó en null) — si ya venían con un valor de PATCH /progreso, no hace falta
-    // tocarlos de nuevo.
-    if (datos.ocr_ok !== undefined) update.ocr_ok = datos.ocr_ok;
-    if (datos.biometrico_ok !== undefined) update.biometrico_ok = datos.biometrico_ok;
-
-    const { data, error } = await supabase
-      .from('solicitudes')
-      .update(update)
       .eq('id', id)
       .select();
 
@@ -242,15 +215,167 @@ export class PersistenceService {
     return data;
   }
 
-  static async marcarPagoConfirmado(solicitudId: string) {
+  // Confirma el pago del enganche y pasa a "Verificando identidad" — ya NO salta
+  // directo a "Preparando paquete": con el flujo nuevo (pago antes que KYC), todavía
+  // falta la sesión de Verificamex en vivo antes de poder armar el envío. Guarda
+  // también el payment_intent para poder reembolsar después desde el botón de
+  // cancelar del admin (StripeService.reembolsarPago).
+  static async marcarPagoConfirmado(solicitudId: string, paymentIntentId?: string) {
+    const update: Record<string, any> = {
+      pago_confirmado: true,
+      estatus: 'Verificando identidad',
+      pago_confirmado_at: new Date().toISOString()
+    };
+    if (paymentIntentId) update.stripe_payment_intent_id = paymentIntentId;
+
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ pago_confirmado: true, estatus: 'Preparando paquete' })
+      .update(update)
       .eq('id', solicitudId)
       .select();
 
     if (error) throw error;
     return data;
+  }
+
+  // Paso 5: confirma el 2do OTP + aceptación de términos, y deja la solicitud lista
+  // para que el frontend pueda pedir la Checkout Session de Stripe.
+  static async confirmarTerminos(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ acepta_terminos: true, estatus: 'Lista para pago' })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Paso 7: guarda el id de la VerificationSession recién creada (primer intento o
+  // reintento) — no toca verificamex_intentos, ese contador es acumulado a lo largo de
+  // toda la solicitud, no por sesión.
+  static async guardarSesionVerificamex(id: string, sessionId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ verificamex_session_id: sessionId, verificamex_status: 'OPEN' })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async getSolicitudByVerificamexSessionId(sessionId: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .eq('verificamex_session_id', sessionId)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
+  // La sesión de Verificamex terminó FAILED — suma un intento fallido y devuelve el
+  // contador actualizado, para que index.ts decida si todavía quedan reintentos (tope 3)
+  // o si hay que escalar a revisión manual.
+  // Devuelve el número de intento ya consumido, o `null` si otro proceso (webhook vs
+  // polling, que pueden llegar juntos) ya había contado este mismo fallo — el `.neq`
+  // hace que solo uno de los dos gane, así un rechazo no consume dos de los 3 intentos.
+  static async registrarFalloVerificamex(id: string): Promise<number | null> {
+    const solicitud = await this.getSolicitudById(id);
+    const intentos = Number(solicitud?.verificamex_intentos || 0) + 1;
+
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ verificamex_intentos: intentos, verificamex_status: 'FAILED' })
+      .eq('id', id)
+      .neq('verificamex_status', 'FAILED')
+      .select();
+
+    if (error) throw error;
+    return data && data.length ? intentos : null;
+  }
+
+  // La sesión de Verificamex terminó FINISHED — marca la identidad como verificada.
+  // El disparo de Skydropx y el mensaje de WhatsApp corren aparte, en index.ts.
+  //
+  // El `.in(...)` sobre el estatus actual no es decorativo: hace que la actualización sea
+  // un compare-and-swap. El webhook de Verificamex y el polling de /estado-verificacion
+  // pueden llegar al mismo tiempo con el mismo resultado, y sin esto los dos pasarían el
+  // chequeo previo y dispararían Skydropx dos veces — dos guías reales cobradas por el
+  // mismo paquete. Devuelve null si otro proceso ya la movió, y ahí el caller no hace nada.
+  static async aprobarVerificacion(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ ocr_ok: true, biometrico_ok: true, estatus: 'Preparando paquete', verificamex_status: 'FINISHED' })
+      .eq('id', id)
+      // 'Aprobado' cubre la aprobación manual del admin, que ya movió el estatus antes de
+      // llegar acá; 'Verificando identidad' es el camino automático.
+      .in('estatus', ['Verificando identidad', 'Aprobado'])
+      .select();
+
+    if (error) throw error;
+    return data && data.length ? data[0] : null;
+  }
+
+  // Se agotaron los 3 intentos de la sesión en vivo — pasa a revisión manual, mismo
+  // estatus "Pendiente" que ya usaba el flujo viejo para este caso.
+  static async escalarRevisionManual(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ ocr_ok: false, biometrico_ok: false, estatus: 'Pendiente' })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Botón "Cancelar solicitud" del admin — cancela todo del lado de Supabase; Stripe
+  // (reembolso + cancelar suscripción) se resuelve aparte en index.ts antes de llamar acá.
+  static async cancelarSolicitud(id: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ estatus: 'Cancelada' })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Cuántos días se sigue insistiendo con los recordatorios antes de dar el lead por
+  // perdido. Sin este tope, una solicitud abandonada hace meses recibiría un WhatsApp
+  // todos los días para siempre — además de ser spam, Meta castiga la calidad del número
+  // (y con la calidad en el piso se cae también el OTP, que es crítico para vender).
+  private static DIAS_MAX_RECORDATORIO = 7;
+
+  // Solicitudes todavía "vivas" en algún punto del flujo pre-envío y lo bastante
+  // recientes como para que valga la pena insistir — candidatas para el cron de
+  // recordatorios de acompañamiento (acompanamientoService.ts).
+  static async getSolicitudesActivasParaRecordatorio() {
+    const desde = new Date(Date.now() - this.DIAS_MAX_RECORDATORIO * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select('*')
+      .in('estatus', ['Iniciada', 'Lista para pago', 'Verificando identidad'])
+      .gte('created_at', desde);
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  // Dedupe de recordatorios: guarda cuál fue el último tipo mandado y cuándo, para que
+  // el cron no repita el mismo aviso el mismo día.
+  static async registrarRecordatorioEnviado(id: string, tipo: string) {
+    const { error } = await supabase
+      .from('solicitudes')
+      .update({ ultimo_recordatorio_tipo: tipo, ultimo_recordatorio_enviado_at: new Date().toISOString() })
+      .eq('id', id);
+
+    if (error) throw error;
   }
 
   // Guarda las referencias de Conekta una vez armada la suscripción semanal automática.

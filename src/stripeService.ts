@@ -349,6 +349,15 @@ export class StripeService {
   }
 
   /**
+   * Reembolsa el enganche ya cobrado — usado por el botón "Cancelar solicitud" del
+   * admin. Reembolso completo (sin `amount`) del PaymentIntent guardado en
+   * `stripe_payment_intent_id` al confirmarse el pago (ver el webhook en index.ts).
+   */
+  static async reembolsarPago(paymentIntentId: string, usarProduccion: boolean): Promise<void> {
+    await this.getClient(usarProduccion).refunds.create({ payment_intent: paymentIntentId });
+  }
+
+  /**
    * Verifica la firma del webhook contra el signing secret del endpoint en Stripe.
    * Como el evento puede venir del endpoint live o del de prueba (dos secretos
    * distintos, ver `usaProduccion`), se prueban en orden hasta que uno verifique —

@@ -9,6 +9,7 @@ import { StripeService } from './stripeService';
 import { CobrosSemanalesService } from './cobrosSemanalesService';
 import { SkydropxService } from './skydropxService';
 import { EntregasService } from './entregasService';
+import { AcompanamientoService } from './acompanamientoService';
 import { WhatsappOtpService } from './whatsappOtpService';
 import { verifyConektaSignature, generateMdmCommandToken } from './security';
 import { SuperadminService } from './superadminService';
@@ -26,6 +27,10 @@ const CONEKTA_PUBLIC_KEY = process.env.CONEKTA_PUBLIC_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const STRIPE_WEBHOOK_SECRET_TEST = process.env.STRIPE_WEBHOOK_SECRET_TEST || '';
 const MDM_JWT_SECRET = process.env.MDM_JWT_SECRET || 'supersecretmdmjwtkey';
+// URL pública de este mismo backend — la necesita Verificamex para poder llamarnos de
+// vuelta con el resultado de la VerificationSession (no hay un req.headers.origin
+// utilizable ahí, a diferencia del checkout de Stripe que sí lo arma desde el navegador).
+const BACKEND_URL = process.env.BACKEND_URL || 'https://movinex-backend-production.up.railway.app';
 
 // Medido contra Railway el 2026-08-16 (no asumido): la cadena que llega a la app es
 // siempre `X-Forwarded-For: <IP real del cliente>, <IP interna de Railway>` — dos
@@ -469,13 +474,30 @@ app.get('/api/solicitudes/:id/resumen', async (req: Request, res: Response) => {
       pagoSemanal: solicitud.pago_semanal,
       costoEnvio: solicitud.costo_envio,
       estatus: solicitud.estatus,
-      tieneIneFrente: Boolean(solicitud.ine_frente),
-      tieneIneReverso: Boolean(solicitud.ine_reverso),
-      tieneSelfie: Boolean(solicitud.selfie),
-      // null = todavía no se corrió esa verificación; false = corrió y no pasó (foto
-      // ilegible o la cara no hizo match) — el frontend usa esto para no mostrar esas
-      // fotos como "cargada correctamente" cuando en realidad son la causa de que la
-      // solicitud haya quedado en revisión manual.
+      pagoConfirmado: solicitud.pago_confirmado === true,
+      // Pasos 3-4 (para poder resumir/prellenar el formulario si el cliente refresca).
+      nombre: solicitud.nombre,
+      apellidos: solicitud.apellidos,
+      curp: solicitud.curp,
+      fechaNacimiento: solicitud.fecha_nacimiento,
+      genero: solicitud.genero,
+      estadoCivil: solicitud.estado_civil,
+      dependientesEconomicos: solicitud.dependientes_economicos,
+      nivelEstudios: solicitud.nivel_estudios,
+      calle: solicitud.calle,
+      numeroExterior: solicitud.numero_exterior,
+      numeroInterior: solicitud.numero_interior,
+      codigoPostal: solicitud.codigo_postal,
+      colonia: solicitud.colonia,
+      alcaldiaMunicipio: solicitud.alcaldia_municipio,
+      estado: solicitud.estado,
+      aceptaTerminos: solicitud.acepta_terminos === true,
+      // Paso 7: estado de la VerificationSession en vivo, para que /verificacion pueda
+      // hacer polling hasta tener una respuesta definitiva en vez de un timeout optimista.
+      verificamexStatus: solicitud.verificamex_status || null,
+      verificamexIntentos: Number(solicitud.verificamex_intentos || 0),
+      // null = todavía no se corrió esa verificación; false = corrió y no pasó — se
+      // mantiene por compatibilidad con filas viejas del flujo anterior.
       ocrOk: solicitud.ocr_ok,
       biometricoOk: solicitud.biometrico_ok
     });
@@ -485,146 +507,126 @@ app.get('/api/solicitudes/:id/resumen', async (req: Request, res: Response) => {
   }
 });
 
-// PATCH: Guarda cada campo (email y/o fotos) apenas el cliente lo completa, sin esperar
-// al submit final — así no se pierde nada si se cae del formulario a mitad de camino.
-// El biométrico corre acá mismo en cuanto quedan disponibles frente + selfie (juntos en
-// el mismo request, o uno ya guardado de una llamada anterior — en ese caso se
-// descarga del bucket para volver a compararlo, porque el base64 original no se guarda).
+// PATCH: Guarda los datos del paso 3 (Datos del cliente) + email apenas el cliente los
+// completa. Ya NO recibe fotos de INE/selfie — la verificación de identidad se mudó al
+// paso 7 (VerificationSession en vivo de Verificamex, ver /crear-sesion-verificamex),
+// así que este endpoint quedó puramente de guardado de texto, sin llamar a Verificamex.
 app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { email, ine_frente, ine_reverso, selfie } = req.body;
+    const { email, nombre, apellidos, fecha_nacimiento, curp, genero, estado_civil, dependientes_economicos, nivel_estudios } = req.body;
 
     const solicitud = await PersistenceService.getSolicitudById(id);
     if (!solicitud) {
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    const emailActual = email !== undefined ? email : solicitud.email;
+    const campos: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
+    if (email !== undefined) campos.email = email;
+    if (nombre !== undefined) campos.nombre = nombre;
+    if (apellidos !== undefined) campos.apellidos = apellidos;
+    // "cliente" (nombre completo, ya usado en todo el admin) se arma acá solo cuando
+    // llegan ambas mitades juntas — el frontend manda el paso 3 entero en un solo PATCH.
+    if (nombre !== undefined && apellidos !== undefined) {
+      campos.cliente = `${nombre} ${apellidos}`.trim();
+    }
+    if (fecha_nacimiento !== undefined) campos.fecha_nacimiento = fecha_nacimiento;
+    if (curp !== undefined) campos.curp = curp;
+    if (genero !== undefined) campos.genero = genero;
+    if (estado_civil !== undefined) campos.estado_civil = estado_civil;
+    if (dependientes_economicos !== undefined) campos.dependientes_economicos = Number(dependientes_economicos);
+    if (nivel_estudios !== undefined) campos.nivel_estudios = nivel_estudios;
 
-    // Paso rápido: subir lo que llegó al bucket y responder ya — Verificamex (OCR +
-    // biométrico) pega a una API externa y puede tardar más de un segundo, no tiene
-    // sentido que el cliente se quede mirando "Guardando..." en la foto todo ese
-    // tiempo cuando lo único que de verdad hace falta ahí es que la imagen quede
-    // guardada. La verificación corre después, en segundo plano (ver más abajo).
-    const camposRapidos: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
-    if (email !== undefined) camposRapidos.email = email;
-    if (ine_frente) camposRapidos.ine_frente = await PersistenceService.subirDocumentoKYC(ine_frente, 'ine_frente');
-    if (ine_reverso) camposRapidos.ine_reverso = await PersistenceService.subirDocumentoKYC(ine_reverso, 'ine_reverso');
-    if (selfie) camposRapidos.selfie = await PersistenceService.subirDocumentoKYC(selfie, 'selfie');
-
-    const solicitudActualizada = await PersistenceService.guardarProgresoSolicitud(id, camposRapidos);
-    res.status(200).json({ success: true, solicitud: solicitudActualizada });
-
-    if (!ine_frente && !selfie) return;
-
-    // Verificamex en segundo plano — ya se respondió, así que un error acá no debe
-    // tirar una excepción no manejada hacia afuera de este handler.
-    (async () => {
-      try {
-        const camposVerificacion: Parameters<typeof PersistenceService.guardarProgresoSolicitud>[1] = {};
-
-        if (ine_frente) {
-          const datosIne = await VerificamexService.leerDatosINE(ine_frente, emailActual);
-          if (datosIne.nombre) camposVerificacion.cliente = datosIne.nombre;
-          camposVerificacion.curp = datosIne.curp;
-          // En modo mock (sin email "real") no se exige — ver el mismo criterio en /finalizar.
-          camposVerificacion.ocr_ok = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
-        }
-
-        const frenteB64 = ine_frente || (solicitud.ine_frente ? await PersistenceService.descargarDocumentoKYC(solicitud.ine_frente) : null);
-        const selfieB64 = selfie || (solicitud.selfie ? await PersistenceService.descargarDocumentoKYC(solicitud.selfie) : null);
-        if (frenteB64 && selfieB64) {
-          const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, emailActual);
-          camposVerificacion.biometrico_ok = biometricResult.valido;
-        }
-
-        if (Object.keys(camposVerificacion).length > 0) {
-          await PersistenceService.guardarProgresoSolicitud(id, camposVerificacion);
-        }
-      } catch (verificacionError: any) {
-        console.error(`[Progreso] Verificamex falló en segundo plano para la solicitud ${id}:`, verificacionError.message);
-      }
-    })();
+    const solicitudActualizada = await PersistenceService.guardarProgresoSolicitud(id, campos);
+    return res.status(200).json({ success: true, solicitud: solicitudActualizada });
   } catch (error: any) {
     console.error('Error al guardar el progreso de la solicitud:', error);
     return res.status(500).json({ error: error.message || 'No se pudo guardar el progreso.' });
   }
 });
 
-// POST: Cierra el ciclo de la solicitud — sin body, todo lo demás ya se guardó
-// progresivamente vía /progreso. Decide el estatus final con lo que ya quedó
-// registrado (ocr_ok/biometrico_ok, null = ese paso nunca se completó, tratado como
-// válido igual que hoy cuando faltan fotos).
-app.post('/api/solicitudes/:id/finalizar', async (req: Request, res: Response) => {
+// Verificación aprobada (FINISHED, auto o admin manual) — arma el envío real en
+// Skydropx con la dirección ya guardada en el paso 4 y avisa por WhatsApp. Compartida
+// entre el webhook de Verificamex y el PATCH manual del admin, para no repetir la
+// lógica de "aprobar + disparar Skydropx" en dos lugares.
+async function aprobarYActivarEnvio(solicitud: any) {
+  // Compare-and-swap: si devuelve null es que otro camino (webhook o polling) ya la
+  // aprobó, y seguir de largo generaría una segunda guía de Skydropx por el mismo envío.
+  const aprobada = await PersistenceService.aprobarVerificacion(solicitud.id);
+  if (!aprobada) {
+    console.log(`[Verificación] La solicitud ${solicitud.id} ya había sido aprobada por otro camino — no se vuelve a generar el envío.`);
+    return;
+  }
+
+  try {
+    await WhatsappOtpService.enviarVerificacionAprobada(solicitud.celular, solicitud.cliente, solicitud.modelo);
+  } catch (whatsappError: any) {
+    console.error(`[Verificación] No se pudo avisar la aprobación por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+  }
+
+  SkydropxService.crearEnvio(
+    solicitud.cliente,
+    solicitud.celular,
+    solicitud.email,
+    {
+      calle: solicitud.calle,
+      numeroExterior: solicitud.numero_exterior,
+      numeroInterior: solicitud.numero_interior,
+      colonia: solicitud.colonia,
+      alcaldiaMunicipio: solicitud.alcaldia_municipio,
+      estado: solicitud.estado,
+      codigoPostal: solicitud.codigo_postal
+    },
+    solicitud.modelo
+  )
+    .then(async ({ trackingNumber, labelUrl, carrier, simulado }) => {
+      if (simulado) {
+        console.warn(`[Skydropx] Guía simulada para la solicitud ${solicitud.id} — la llamada real a Skydropx falló o no está configurada.`);
+      }
+      await PersistenceService.guardarEnvio(solicitud.id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier });
+      console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${solicitud.id}: ${trackingNumber}`);
+    })
+    .catch((skydropxError: any) => {
+      console.error(`[Skydropx] No se pudo generar la guía en segundo plano para la solicitud ${solicitud.id}:`, skydropxError.message);
+    });
+}
+
+// Paso 7: crea (o recrea, para un reintento) la VerificationSession en vivo de
+// Verificamex y devuelve la URL hosteada a la que el frontend redirige — mismo patrón
+// que crear-orden-enganche con Stripe. Se llama tanto para el primer intento como para
+// cada uno de los reintentos (hasta 3 en total).
+app.post('/api/solicitudes/:id/crear-sesion-verificamex', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { aceptaTerminos } = req.body;
-
     const solicitud = await PersistenceService.getSolicitudById(id);
     if (!solicitud) {
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
-
-    const kycResult = await VerificamexService.validarTelefono(solicitud.celular);
-
-    // `biometrico_ok`/`ocr_ok` pueden seguir en null acá aunque las fotos ya estén
-    // subidas: el chequeo que dispara PATCH /progreso corre en segundo plano (fire-
-    // and-forget, para que esa respuesta sea rápida) y todavía puede no haber
-    // terminado si el cliente tocó "Enviar" muy rápido después de subir la selfie.
-    // Tratar null como "válido" en ese caso es un bypass real de la verificación
-    // (bug encontrado 2026-08-12: aprobó una solicitud con selfie de otra persona
-    // porque el chequeo real terminó *después* de este endpoint). Si las fotos están
-    // pero el resultado no llegó todavía, se corre acá mismo antes de decidir.
-    let biometricoOkRaw = solicitud.biometrico_ok;
-    let ocrOkRaw = solicitud.ocr_ok;
-    let cliente = solicitud.cliente;
-    let curp = solicitud.curp;
-
-    if (solicitud.ine_frente && solicitud.selfie && biometricoOkRaw === null) {
-      const [frenteB64, selfieB64] = await Promise.all([
-        PersistenceService.descargarDocumentoKYC(solicitud.ine_frente),
-        PersistenceService.descargarDocumentoKYC(solicitud.selfie)
-      ]);
-      const biometricResult = await VerificamexService.validarIdentidadBiometrica(frenteB64, selfieB64, solicitud.email);
-      biometricoOkRaw = biometricResult.valido;
-
-      if (ocrOkRaw === null) {
-        const datosIne = await VerificamexService.leerDatosINE(frenteB64, solicitud.email);
-        if (datosIne.nombre) cliente = datosIne.nombre;
-        curp = datosIne.curp;
-        ocrOkRaw = datosIne.rawData?.mock ? true : Boolean(datosIne.nombre) && Boolean(datosIne.curp);
-      }
+    if (!solicitud.pago_confirmado) {
+      return res.status(409).json({ error: 'Esta solicitud todavía no pagó el enganche.' });
+    }
+    if (Number(solicitud.verificamex_intentos || 0) >= 3) {
+      return res.status(409).json({ error: 'Se agotaron los intentos de verificación — tu solicitud está en revisión manual.' });
     }
 
-    const biometricoOk = biometricoOkRaw !== false;
-    const ocrOk = ocrOkRaw !== false;
-    const esSolicitudValida = kycResult.valido && biometricoOk && ocrOk;
-    const estatusFinal = esSolicitudValida ? 'Aprobado' : 'Pendiente';
+    const origin = (req.headers.origin as string) || ALLOWED_ORIGINS[0];
+    const redirectUrl = `${origin}/verificacion?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+    const webhookUrl = `${BACKEND_URL}/api/webhooks/verificamex`;
 
-    if (!esSolicitudValida) {
-      console.warn(`[ALERTA DE RIESGO] Envío de alerta a desarrollo@movinex.mx: El cliente ${cliente} con teléfono ${solicitud.celular} no fue autorizado automáticamente por Verificamex (Teléfono: ${kycResult.valido ? 'OK' : 'RECHAZADO'}, Biometría: ${biometricoOk ? 'OK' : 'RECHAZADO'}, Lectura INE: ${ocrOk ? 'OK' : 'INCOMPLETA/ILEGIBLE'}).`);
+    const sesion = await VerificamexService.crearSesionVerificacion(id, solicitud.email, redirectUrl, webhookUrl);
+    await PersistenceService.guardarSesionVerificamex(id, sesion.sessionId || `sin-id-${id}`);
+
+    if (sesion.mock) {
+      // No hay página hosteada real que mostrar en mock — se resuelve como aprobada al
+      // toque, y el frontend redirige él mismo a redirectUrl para seguir el mismo camino.
+      await aprobarYActivarEnvio(solicitud);
+      return res.status(200).json({ success: true, mock: true, redirectUrl });
     }
 
-    const solicitudFinal = await PersistenceService.finalizarSolicitud(id, {
-      cliente,
-      curp,
-      estatus: estatusFinal,
-      acepta_terminos: Boolean(aceptaTerminos),
-      ocr_ok: ocrOkRaw,
-      biometrico_ok: biometricoOkRaw
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: esSolicitudValida
-        ? 'Solicitud de crédito aprobada y registrada con éxito.'
-        : 'Solicitud registrada. Requiere verificación adicional.',
-      solicitud: solicitudFinal
-    });
+    return res.status(200).json({ success: true, mock: false, formUrl: sesion.formUrl });
   } catch (error: any) {
-    console.error('Error al finalizar la solicitud:', error);
-    return res.status(500).json({ error: error.message || 'No se pudo finalizar la solicitud.' });
+    console.error('Error al crear la sesión de Verificamex:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo iniciar la verificación de identidad.' });
   }
 });
 
@@ -687,12 +689,16 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
     if (solicitud.pago_confirmado) {
       return res.status(409).json({ error: 'Esta solicitud ya tiene el enganche pagado.' });
     }
-    if (solicitud.estatus !== 'Aprobado') {
-      return res.status(409).json({ error: 'Esta solicitud todavía no está aprobada para pagar.' });
+    // Ya no exige "Aprobado" (eso era del flujo viejo, verificación antes de pagar) —
+    // ahora se paga apenas se completan los pasos 1-5 (datos, dirección, 2do OTP+términos).
+    if (solicitud.estatus !== 'Lista para pago') {
+      return res.status(409).json({ error: 'Esta solicitud todavía no está lista para pagar.' });
     }
 
     const origin = (req.headers.origin as string) || ALLOWED_ORIGINS[0];
-    const successUrl = `${origin}/domicilio?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+    // Ya no vuelve a /domicilio (la dirección se pidió antes de pagar, en el paso 4) —
+    // ahora vuelve a la verificación de identidad en vivo (paso 7).
+    const successUrl = `${origin}/verificacion?solicitud=${id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
     const cancelUrl = `${origin}/`;
 
     const { sessionId, url } = await StripeService.crearCheckoutSession(
@@ -758,6 +764,10 @@ app.post('/api/solicitudes/:id/crear-orden-enganche', async (req: Request, res: 
  *       200:
  *         description: Domicilio guardado y guía de envío generada.
  */
+// Paso 4 del flujo nuevo: se llama ANTES del pago, solo para guardar la dirección — ya
+// no dispara Skydropx acá (antes lo hacía porque este paso ocurría después del pago).
+// La guía real se genera recién cuando la verificación de Verificamex aprueba (ver
+// aprobarYActivarEnvio más abajo), usando esta misma dirección ya guardada.
 app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -775,45 +785,59 @@ app.post('/api/solicitudes/:id/domicilio', async (req: Request, res: Response) =
       return res.status(404).json({ error: 'Solicitud no encontrada.' });
     }
 
-    // Responder ya con el domicilio guardado — la guía de Skydropx (cotizar → elegir
-    // tarifa → generar guía, con polling en cada paso) puede tardar varios segundos y no
-    // hace falta que el cliente la espere en esta pantalla. Se genera atrás, sin bloquear
-    // la respuesta; el admin la va a ver aparecer sola (guardarEnvio) apenas termine. El
-    // pequeño delay es solo para que la pantalla no pegue el salto de "guardando..." a
-    // "listo" de forma demasiado brusca.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    res.status(200).json({ success: true, solicitud });
-
-    SkydropxService.crearEnvio(
-      solicitud.cliente,
-      solicitud.celular,
-      solicitud.email,
-      {
-        calle,
-        numeroExterior: numero_exterior,
-        numeroInterior: numero_interior,
-        colonia,
-        alcaldiaMunicipio: alcaldia_municipio,
-        estado,
-        codigoPostal: codigo_postal
-      },
-      solicitud.modelo
-    )
-      .then(async ({ trackingNumber, labelUrl, carrier, simulado }) => {
-        if (simulado) {
-          console.warn(`[Skydropx] Guía simulada para la solicitud ${id} — la llamada real a Skydropx falló o no está configurada.`);
-        }
-        // No se toca el estatus acá: lo mueve el admin a mano (Preparando paquete ->
-        // Pendiente de envío -> Enviado). Esto solo guarda la guía.
-        await PersistenceService.guardarEnvio(id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier });
-        console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${id}: ${trackingNumber}`);
-      })
-      .catch((skydropxError: any) => {
-        console.error(`[Skydropx] No se pudo generar la guía en segundo plano para la solicitud ${id}:`, skydropxError.message);
-      });
+    return res.status(200).json({ success: true, solicitud });
   } catch (error: any) {
     console.error('Error al guardar domicilio:', error);
     return res.status(500).json({ error: error.message || 'Ocurrió un error al procesar el domicilio.' });
+  }
+});
+
+// Paso 5: confirma el 2do OTP + aceptación de términos. Mismo gate anti-bot que
+// /iniciar (getOtpVerificado), y valida server-side que los pasos 3-4 ya estén
+// completos — evita que alguien salte pasos pegándole directo a la API. Deja la
+// solicitud en "Lista para pago", el único estatus que /crear-orden-enganche acepta.
+app.post('/api/solicitudes/:id/confirmar-terminos', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { aceptaTerminos } = req.body;
+
+    if (!aceptaTerminos) {
+      return res.status(400).json({ error: 'Tenés que aceptar los términos y condiciones para continuar.' });
+    }
+
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    // Solo se puede confirmar desde el tramo previo al pago. Sin este gate, cualquiera
+    // con el link de una solicitud **cancelada** (que el admin ya reembolsó) o rechazada
+    // podía revivirla volviendo a aceptar los términos, porque eso la dejaba de nuevo en
+    // "Lista para pago" y habilitaba un pago nuevo. Se permite repetir desde "Lista para
+    // pago" para que reintentar el mismo paso no falle.
+    if (solicitud.estatus !== 'Iniciada' && solicitud.estatus !== 'Lista para pago') {
+      return res.status(409).json({ error: 'Esta solicitud ya no puede continuar desde este paso.' });
+    }
+
+    const otpVerificado = await PersistenceService.getOtpVerificado(solicitud.celular);
+    if (!otpVerificado) {
+      return res.status(400).json({ error: 'Verifica tu número de WhatsApp de nuevo antes de continuar.' });
+    }
+
+    const faltantes: string[] = [];
+    if (!solicitud.cliente || solicitud.cliente === 'Pendiente de verificación') faltantes.push('datos del cliente');
+    if (!solicitud.curp) faltantes.push('CURP');
+    if (!solicitud.email) faltantes.push('email');
+    if (!solicitud.calle || !solicitud.codigo_postal) faltantes.push('dirección');
+    if (faltantes.length > 0) {
+      return res.status(400).json({ error: `Faltan completar: ${faltantes.join(', ')}.` });
+    }
+
+    const solicitudActualizada = await PersistenceService.confirmarTerminos(id);
+    return res.status(200).json({ success: true, solicitud: solicitudActualizada });
+  } catch (error: any) {
+    console.error('Error al confirmar términos:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo confirmar. Intenta de nuevo.' });
   }
 });
 
@@ -874,7 +898,17 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
       }
     }
 
+    // La solicitud a resolver puede venir de una revisión manual post-pago (ver
+    // registrarFalloVerificamex/escalarRevisionManual) — si el admin la aprueba y ya
+    // está pagada, no hay nada más que esperar: dispara Skydropx acá mismo en vez de
+    // dejarla en un "Aprobado" de reposo (ese estado era para el flujo viejo, donde
+    // "Aprobado" significaba "todavía falta que pague").
+    const solicitudPrevia = await PersistenceService.getSolicitudById(id);
     const solicitudActualizada = await PersistenceService.updateEstatus(id, estatus);
+
+    if (estatus === 'Aprobado' && solicitudPrevia?.pago_confirmado) {
+      await aprobarYActivarEnvio(solicitudActualizada);
+    }
 
     if (estatus === 'Enviado') {
       try {
@@ -888,6 +922,58 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
   } catch (error: any) {
     console.error('Error actualizando estatus:', error);
     return res.status(500).json({ error: error.message || 'Error al actualizar estatus.' });
+  }
+});
+
+// POST: Botón "Cancelar solicitud" del panel de admin — cancela todo, en Supabase y en
+// Stripe (reembolsa el enganche si ya se pagó, cancela la suscripción semanal si llegó
+// a armarse). No hay reembolso automático en ningún otro camino del flujo (ver
+// aprobarYActivarEnvio/escalarRevisionManual) — esta es la única vía de reembolso, y es
+// una decisión explícita del admin, no algo que dispare el sistema solo.
+app.post('/api/admin/solicitudes/:id/cancelar', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+
+    const ESTATUS_TERMINALES = ['Enviado', 'Entregado', 'Cancelada'];
+    if (ESTATUS_TERMINALES.includes(solicitud.estatus)) {
+      return res.status(409).json({ error: `No se puede cancelar una solicitud en estatus "${solicitud.estatus}".` });
+    }
+
+    const usarProduccion = StripeService.usaProduccion(solicitud.email);
+
+    if (solicitud.stripe_subscription_id) {
+      try {
+        await StripeService.cancelarSuscripcion(solicitud.stripe_subscription_id, usarProduccion);
+      } catch (stripeError: any) {
+        console.error(`[Cancelar] No se pudo cancelar la suscripción de Stripe de la solicitud ${id}: ${stripeError.message}`);
+      }
+    }
+
+    if (solicitud.pago_confirmado && solicitud.stripe_payment_intent_id) {
+      try {
+        await StripeService.reembolsarPago(solicitud.stripe_payment_intent_id, usarProduccion);
+      } catch (stripeError: any) {
+        console.error(`[Cancelar] No se pudo reembolsar el pago de la solicitud ${id}: ${stripeError.message}`);
+        return res.status(500).json({ error: 'No se pudo reembolsar el pago en Stripe — la solicitud NO se canceló. Revisa el dashboard de Stripe antes de reintentar.' });
+      }
+    }
+
+    const solicitudCancelada = await PersistenceService.cancelarSolicitud(id);
+
+    try {
+      await WhatsappOtpService.enviarSolicitudCancelada(solicitud.celular, solicitud.cliente, solicitud.modelo);
+    } catch (whatsappError: any) {
+      console.error(`[Cancelar] No se pudo avisar la cancelación por WhatsApp a la solicitud ${id}: ${whatsappError.message}`);
+    }
+
+    return res.status(200).json({ success: true, solicitud: solicitudCancelada });
+  } catch (error: any) {
+    console.error('Error al cancelar la solicitud:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo cancelar la solicitud.' });
   }
 });
 
@@ -1118,7 +1204,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
-      await PersistenceService.marcarPagoConfirmado(solicitudId);
+      await PersistenceService.marcarPagoConfirmado(solicitudId, paymentIntentId);
       console.log(`[Stripe Webhook] Pago confirmado para la solicitud ${solicitudId}.`);
 
       // Arma el cobro semanal automático a partir de cómo se pagó el enganche.
@@ -1145,7 +1231,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
             try {
-              const linkContinuar = `${ALLOWED_ORIGINS[0]}/domicilio?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+              const linkContinuar = `${ALLOWED_ORIGINS[0]}/verificacion?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
               await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
@@ -1176,7 +1262,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // success_url) — sin este aviso, nadie le dice que ya puede volver a cargar
             // su domicilio. Mismo link que usa crear-orden-enganche para success_url.
             try {
-              const linkContinuar = `${ALLOWED_ORIGINS[0]}/domicilio?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+              const linkContinuar = `${ALLOWED_ORIGINS[0]}/verificacion?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
               await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
@@ -1291,25 +1377,143 @@ app.post('/api/mdm/command', (req: Request, res: Response) => {
 });
 
 // POST: Verificación de identidad del cliente (respuesta simulada, hardcodeada)
-app.post('/api/webhooks/verificacion-cliente', async (req: Request, res: Response) => {
+// Verificamex limita a 30 llamadas por minuto **por endpoint y por token** — o sea, el
+// tope es de toda la cuenta, no por cliente. La pantalla /verificacion consulta cada
+// pocos segundos, así que sin freno un solo cliente verificando ya se comería la mayor
+// parte de esa cuota y dos en paralelo la reventarían (dejando a todos sin poder
+// verificar). Acá se limita a una consulta real cada 10s por sesión: entre medio se
+// responde con lo último guardado, que igual se actualiza solo apenas llega el webhook.
+const ultimaConsultaVerificamex = new Map<string, number>();
+const INTERVALO_MIN_CONSULTA_MS = 10_000;
+
+function puedeConsultarVerificamex(sessionId: string): boolean {
+  const ahora = Date.now();
+  const ultima = ultimaConsultaVerificamex.get(sessionId);
+  if (ultima && ahora - ultima < INTERVALO_MIN_CONSULTA_MS) return false;
+
+  ultimaConsultaVerificamex.set(sessionId, ahora);
+  // La sesión de verificación dura minutos, no días: se limpian las entradas viejas para
+  // que este Map no crezca sin límite en un proceso que corre semanas seguidas.
+  if (ultimaConsultaVerificamex.size > 500) {
+    for (const [id, ts] of ultimaConsultaVerificamex) {
+      if (ahora - ts > 60 * 60 * 1000) ultimaConsultaVerificamex.delete(id);
+    }
+  }
+  return true;
+}
+
+// GET: Estado de la verificación en vivo, para que la pantalla /verificacion lo consulte
+// mientras espera. **No se limita a leer la base**: si la sesión sigue OPEN/VERIFYING
+// para nosotros, le pregunta a Verificamex cómo va y aplica el resultado en el momento.
+// Ese fallback es lo que hace que el flujo no dependa de que el webhook llegue —
+// imprescindible en local (Verificamex no puede alcanzar localhost) y una red de
+// seguridad en producción, donde un webhook perdido dejaría la solicitud colgada.
+app.get('/api/solicitudes/:id/estado-verificacion', async (req: Request, res: Response) => {
   try {
-    console.log('Iniciando simulación de verificación KYC...');
-    
-    // Simular un retraso/timeout de 3 segundos para el análisis biométrico
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    const { id } = req.params;
+    let solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
 
-    console.log('Simulación completada con éxito. Cliente verificado.');
+    const enCurso = solicitud.verificamex_status === 'OPEN' || solicitud.verificamex_status === 'VERIFYING';
+    if (enCurso && solicitud.verificamex_session_id && puedeConsultarVerificamex(solicitud.verificamex_session_id)) {
+      const sesion = await VerificamexService.consultarSesion(solicitud.verificamex_session_id);
+      if (sesion && sesion.status !== solicitud.verificamex_status) {
+        console.log(`[Verificamex] Polling: la sesión ${solicitud.verificamex_session_id} pasó a ${sesion.status}${sesion.comments ? ` (${sesion.comments})` : ''}.`);
+        await procesarResultadoVerificamex(solicitud, sesion.status);
+        solicitud = await PersistenceService.getSolicitudById(id);
+      }
+    }
 
-    // Responder con un JSON de éxito idéntico a una validación real
     return res.status(200).json({
-      success: true,
-      score: 0.98,
-      status: "APPROVED",
-      message: "Verificación de identidad simulada exitosamente."
+      estatus: solicitud.estatus,
+      pagoConfirmado: solicitud.pago_confirmado === true,
+      verificamexStatus: solicitud.verificamex_status || null,
+      verificamexIntentos: Number(solicitud.verificamex_intentos || 0)
     });
   } catch (error: any) {
-    console.error('Error en simulación:', error);
-    return res.status(500).json({ error: 'Error al conectar con el servidor de verificación.' });
+    console.error('Error al consultar el estado de la verificación:', error);
+    return res.status(500).json({ error: 'No se pudo consultar el estado de la verificación.' });
+  }
+});
+
+// Aplica el resultado de una VerificationSession a la solicitud. Compartida entre el
+// webhook de Verificamex (camino rápido) y el polling de /estado-verificacion (camino
+// confiable) — los dos tienen que hacer exactamente lo mismo, así que vive en un solo
+// lugar. Es idempotente para los estados finales: si ya se procesó antes (estatus fuera
+// de "Verificando identidad", o verificamex_status ya final) no vuelve a disparar
+// Skydropx ni a contar el fallo de nuevo.
+async function procesarResultadoVerificamex(solicitud: any, status: string | undefined) {
+  if (status !== 'FINISHED' && status !== 'FAILED') {
+    return; // OPEN/VERIFYING: todavía en curso, nada que hacer.
+  }
+
+  if (solicitud.verificamex_status === 'FINISHED' || solicitud.estatus !== 'Verificando identidad') {
+    console.log(`[Verificamex] La solicitud ${solicitud.id} ya no está esperando verificación (estatus: ${solicitud.estatus}) — se ignora el resultado repetido.`);
+    return;
+  }
+
+  if (status === 'FINISHED') {
+    await aprobarYActivarEnvio(solicitud);
+    return;
+  }
+
+  // FAILED: si ya se contó este mismo fallo (el webhook y el polling pueden llegar los
+  // dos), no se vuelve a incrementar el contador de intentos.
+  if (solicitud.verificamex_status === 'FAILED') {
+    console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} ya estaba registrado — no se cuenta dos veces.`);
+    return;
+  }
+
+  const intentos = await PersistenceService.registrarFalloVerificamex(solicitud.id);
+  if (intentos === null) {
+    console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} lo registró otro camino en paralelo — no se cuenta dos veces.`);
+    return;
+  }
+  console.log(`[Verificamex] Verificación fallida para la solicitud ${solicitud.id} (intento ${intentos} de 3).`);
+
+  if (intentos >= 3) {
+    await PersistenceService.escalarRevisionManual(solicitud.id);
+    try {
+      await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
+    } catch (whatsappError: any) {
+      console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+    }
+  }
+  // Con intentos disponibles no se manda WhatsApp acá: la pantalla /verificacion ya
+  // ofrece "Intentar de nuevo" al toque. El aviso (movinex_verificacion_reintentar) es
+  // solo el respaldo diario del cron de acompañamiento, por si abandonó el navegador.
+}
+
+// Webhook real de Verificamex: recibe el objeto VerificationSession actualizado cada
+// vez que cambia de estado. `optionals.solicitud_id` viaja desde que se creó la sesión
+// (ver crear-sesion-verificamex) — se usa como forma principal de encontrar la
+// solicitud, con el session id guardado como respaldo si por algo faltara.
+app.post('/api/webhooks/verificamex', async (req: Request, res: Response) => {
+  try {
+    const sesion = req.body?.data || req.body;
+    const status: string | undefined = sesion?.status;
+    const sessionId: string | undefined = sesion?.id;
+    const solicitudId: string | undefined = sesion?.optionals?.solicitud_id;
+
+    console.log(`[Verificamex Webhook] Sesión ${sessionId} (solicitud ${solicitudId}) → status: ${status}`);
+
+    let solicitud = solicitudId ? await PersistenceService.getSolicitudById(solicitudId) : null;
+    if (!solicitud && sessionId) {
+      solicitud = await PersistenceService.getSolicitudByVerificamexSessionId(sessionId);
+    }
+    if (!solicitud) {
+      console.warn(`[Verificamex Webhook] No se encontró ninguna solicitud para la sesión ${sessionId}.`);
+      return res.status(200).json({ received: true });
+    }
+
+    await procesarResultadoVerificamex(solicitud, status);
+
+    return res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error('Error procesando webhook de Verificamex:', error);
+    return res.status(500).json({ error: 'Error procesando webhook' });
   }
 });
 
@@ -1356,6 +1560,29 @@ cron.schedule('0 9 * * *', () => {
     console.error('[Cron] Error al procesar cobros semanales (OXXO):', error.message);
   });
 }, { timezone: 'America/Mexico_City' });
+
+// Cron diario (10am hora de Ciudad de México, entre el de cobros semanales a las 9am y
+// el de entregas a las 11am) con los recordatorios de acompañamiento del onboarding
+// (pasos 2 a 7) — ver acompanamientoService.ts. Los avisos en tiempo real (pago
+// confirmado, verificación aprobada/rechazada, cancelación) no pasan por acá — esos
+// disparan al toque desde el webhook/endpoint correspondiente, no dependen de este cron.
+cron.schedule('0 10 * * *', () => {
+  console.log('[Cron] Procesando recordatorios de acompañamiento...');
+  AcompanamientoService.procesarPendientes(ALLOWED_ORIGINS[0]).catch((error) => {
+    console.error('[Cron] Error al procesar recordatorios de acompañamiento:', error.message);
+  });
+}, { timezone: 'America/Mexico_City' });
+
+// Endpoint manual para probar el cron de acompañamiento sin esperar al horario.
+app.post('/api/admin/acompanamiento/procesar', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    await AcompanamientoService.procesarPendientes((req.headers.origin as string) || ALLOWED_ORIGINS[0]);
+    return res.status(200).json({ success: true });
+  } catch (error: any) {
+    console.error('Error al procesar recordatorios de acompañamiento a mano:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo procesar.' });
+  }
+});
 
 // Cron diario que borra los códigos OTP ya expirados (no se usan para nada
 // una vez pasado expira_en — ver PersistenceService.getOtpVerificado). Evita

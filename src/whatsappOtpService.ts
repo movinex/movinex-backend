@@ -13,6 +13,19 @@ export class WhatsappOtpService {
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
   private static ENVIADO_TEMPLATE_NAME = process.env.WHATSAPP_ENVIADO_TEMPLATE_NAME || 'movinex_pedido_enviado';
   private static ENTREGADO_TEMPLATE_NAME = process.env.WHATSAPP_ENTREGADO_TEMPLATE_NAME || 'movinex_pedido_entregado';
+  // Plantillas nuevas del rediseño de onboarding (ago 2026), dadas de alta en Meta el
+  // 2026-08-17 — ver el artifact "Guión WhatsApp Movinex" para el texto exacto. Idioma
+  // es_MX. Las tres de recordatorio previas al pago quedaron en categoría **Marketing**
+  // (Meta rechaza Servicio cuando todavía no existe un pedido pagado); el resto son
+  // Servicio/Utility. Si alguna no estuviera aprobada, cae al modo mock como el resto.
+  private static DATOS_PENDIENTES_TEMPLATE_NAME = process.env.WHATSAPP_DATOS_PENDIENTES_TEMPLATE_NAME || 'movinex_datos_pendientes';
+  private static TERMINOS_PENDIENTES_TEMPLATE_NAME = process.env.WHATSAPP_TERMINOS_PENDIENTES_TEMPLATE_NAME || 'movinex_terminos_pendientes';
+  private static PAGO_PENDIENTE_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_PENDIENTE_TEMPLATE_NAME || 'movinex_pago_pendiente';
+  private static VERIFICACION_PENDIENTE_TEMPLATE_NAME = process.env.WHATSAPP_VERIFICACION_PENDIENTE_TEMPLATE_NAME || 'movinex_verificacion_pendiente';
+  private static VERIFICACION_APROBADA_TEMPLATE_NAME = process.env.WHATSAPP_VERIFICACION_APROBADA_TEMPLATE_NAME || 'movinex_verificacion_aprobada';
+  private static VERIFICACION_REINTENTAR_TEMPLATE_NAME = process.env.WHATSAPP_VERIFICACION_REINTENTAR_TEMPLATE_NAME || 'movinex_verificacion_reintentar';
+  private static VERIFICACION_REVISION_TEMPLATE_NAME = process.env.WHATSAPP_VERIFICACION_REVISION_TEMPLATE_NAME || 'movinex_verificacion_revision';
+  private static SOLICITUD_CANCELADA_TEMPLATE_NAME = process.env.WHATSAPP_SOLICITUD_CANCELADA_TEMPLATE_NAME || 'movinex_solicitud_cancelada';
   private static MOCK = process.env.WHATSAPP_OTP_MOCK === 'true' || !this.ACCESS_TOKEN || !this.PHONE_NUMBER_ID;
   private static GRAPH_URL = 'https://graph.facebook.com/v20.0';
 
@@ -350,6 +363,94 @@ export class WhatsappOtpService {
       console.error('[WhatsApp Pedido Entregado] Error al enviar el aviso:', error.response?.data || error.message);
       throw new Error('No se pudo enviar el aviso de entrega por WhatsApp.');
     }
+  }
+
+  /**
+   * Helper compartido por todas las plantillas nuevas de acompañamiento (todas Utility,
+   * un solo componente `body` con parámetros de texto en orden) — evita repetir el
+   * mismo armado de request 8 veces. Las plantillas ya existentes (OTP, cobro semanal,
+   * etc.) tienen shapes propios (botones, distinto orden histórico) y se dejan como
+   * están arriba, sin migrarlas a este helper.
+   */
+  private static async enviarTemplateSimple(
+    celular: string,
+    templateName: string,
+    parametros: string[],
+    logLabel: string
+  ): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp ${logLabel} MOCK] ${celular} — plantilla "${templateName}": ${JSON.stringify(parametros)}`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: templateName,
+            language: { code: 'es_MX' },
+            components: [
+              { type: 'body', parameters: parametros.map((texto) => ({ type: 'text', text: texto })) }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp ${logLabel}] Enviado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error(`[WhatsApp ${logLabel}] Error al enviar:`, error.response?.data || error.message);
+      throw new Error(`No se pudo enviar el mensaje de WhatsApp (${logLabel}).`);
+    }
+  }
+
+  // Paso 2→3-4: verificó el OTP pero no completó datos/dirección.
+  static async enviarDatosPendientes(celular: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(celular, this.DATOS_PENDIENTES_TEMPLATE_NAME, [modelo, link], 'Datos Pendientes');
+  }
+
+  // Paso 4→5: completó datos/dirección pero no el 2do OTP + términos.
+  static async enviarTerminosPendientes(celular: string, cliente: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(celular, this.TERMINOS_PENDIENTES_TEMPLATE_NAME, [cliente, modelo, link], 'Términos Pendientes');
+  }
+
+  // Paso 5→6: aceptó términos pero no pagó el enganche — el más urgente antes de cobrar.
+  static async enviarPagoPendiente(celular: string, cliente: string, modelo: string, monto: number, link: string) {
+    return this.enviarTemplateSimple(celular, this.PAGO_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, monto.toLocaleString('es-MX'), link], 'Pago Pendiente');
+  }
+
+  // Paso 6→7: ya pagó pero no completó la verificación en vivo — plata ya cobrada sin cerrar el ciclo.
+  static async enviarVerificacionPendiente(celular: string, cliente: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(celular, this.VERIFICACION_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, link], 'Verificación Pendiente');
+  }
+
+  // La sesión de Verificamex terminó FINISHED.
+  static async enviarVerificacionAprobada(celular: string, cliente: string, modelo: string) {
+    return this.enviarTemplateSimple(celular, this.VERIFICACION_APROBADA_TEMPLATE_NAME, [cliente, modelo], 'Verificación Aprobada');
+  }
+
+  // FAILED con intentos disponibles — respaldo por si no reintentó solo desde la app.
+  static async enviarVerificacionReintentar(celular: string, cliente: string, link: string) {
+    return this.enviarTemplateSimple(celular, this.VERIFICACION_REINTENTAR_TEMPLATE_NAME, [cliente, link], 'Verificación Reintentar');
+  }
+
+  // 3er FAILED seguido — pasa a revisión manual, sin más reintentos.
+  static async enviarVerificacionRevision(celular: string, cliente: string) {
+    return this.enviarTemplateSimple(celular, this.VERIFICACION_REVISION_TEMPLATE_NAME, [cliente], 'Verificación Revisión');
+  }
+
+  // El admin usó el botón "Cancelar solicitud".
+  static async enviarSolicitudCancelada(celular: string, cliente: string, modelo: string) {
+    return this.enviarTemplateSimple(celular, this.SOLICITUD_CANCELADA_TEMPLATE_NAME, [cliente, modelo], 'Solicitud Cancelada');
   }
 
   static async verificarCodigo(celular: string, codigo: string): Promise<boolean> {
