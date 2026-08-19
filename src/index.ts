@@ -1784,12 +1784,16 @@ cron.schedule('0 9 * * *', () => {
   });
 }, { timezone: 'America/Mexico_City' });
 
-// Cron diario (10am hora de Ciudad de México, entre el de cobros semanales a las 9am y
-// el de entregas a las 11am) con los recordatorios de acompañamiento del onboarding
-// (pasos 2 a 7) — ver acompanamientoService.ts. Los avisos en tiempo real (pago
-// confirmado, verificación aprobada/rechazada, cancelación) no pasan por acá — esos
-// disparan al toque desde el webhook/endpoint correspondiente, no dependen de este cron.
-cron.schedule('0 10 * * *', () => {
+// Cron de recordatorios de acompañamiento del onboarding (pasos 2 a 7) — ver
+// acompanamientoService.ts. Corre cada 15 minutos (antes: una vez al día a las 10am) para
+// poder mandar el primer aviso a los 30 min de inactividad, pedido explícito de Eduardo
+// 2026-08-19 ("para no dejar pasar tanto tiempo") — la lógica interna de
+// AcompanamientoService es la que decide caso por caso si de verdad toca mandar algo
+// (30 min para el primero, 1 por semana después), así que correr seguido es seguro, no
+// manda de más. Los avisos en tiempo real (pago confirmado, verificación
+// aprobada/rechazada, cancelación) no pasan por acá — esos disparan al toque desde el
+// webhook/endpoint correspondiente, no dependen de este cron.
+cron.schedule('*/15 * * * *', () => {
   console.log('[Cron] Procesando recordatorios de acompañamiento...');
   AcompanamientoService.procesarPendientes(ALLOWED_ORIGINS[0]).catch((error) => {
     console.error('[Cron] Error al procesar recordatorios de acompañamiento:', error.message);
