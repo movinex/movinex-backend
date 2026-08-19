@@ -1059,6 +1059,82 @@ app.post('/api/admin/login', loginLimiter, async (req: Request, res: Response) =
   }
 });
 
+// GET/PUT: parámetros de negocio (enganche/tasa/IVA/cargo semanal) que usa
+// catalogo-view.tsx al calcular precios sugeridos — antes hardcodeados en el frontend.
+// Cambiar esto solo afecta a celulares que se agreguen/reguarden desde ahora; los que
+// ya están en el catálogo conservan sus montos guardados hasta que alguien los reguarde.
+app.get('/api/admin/configuracion', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const config = await PersistenceService.getConfiguracion();
+    return res.status(200).json(config);
+  } catch (error: any) {
+    console.error('Error al obtener la configuración:', error.message);
+    return res.status(500).json({ error: 'No se pudo obtener la configuración.' });
+  }
+});
+
+app.put('/api/admin/configuracion', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { enganche_pct, tasa_anual_pct, iva_pct, cargo_semanal_nombre, cargo_semanal_monto } = req.body;
+    const numeros = [enganche_pct, tasa_anual_pct, iva_pct, cargo_semanal_monto];
+    if (numeros.some((n) => typeof n !== 'number' || !Number.isFinite(n) || n < 0)) {
+      return res.status(400).json({ error: 'Los valores numéricos deben ser mayores o iguales a 0.' });
+    }
+    if (!cargo_semanal_nombre || typeof cargo_semanal_nombre !== 'string') {
+      return res.status(400).json({ error: 'Falta el nombre del cargo semanal.' });
+    }
+
+    const config = await PersistenceService.actualizarConfiguracion({
+      enganche_pct, tasa_anual_pct, iva_pct, cargo_semanal_nombre, cargo_semanal_monto
+    });
+    return res.status(200).json(config);
+  } catch (error: any) {
+    console.error('Error al actualizar la configuración:', error.message);
+    return res.status(500).json({ error: 'No se pudo actualizar la configuración.' });
+  }
+});
+
+// Cotizador interno (/sadmin/cotizador): guarda cotizaciones como referencia/historial
+// del equipo. No crea ninguna solicitud ni crédito real — eso solo pasa a través del
+// flujo real del cliente (OTP, pago por Stripe, verificación de Verificamex).
+app.get('/api/admin/cotizaciones', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const cotizaciones = await PersistenceService.getCotizacionesInternas();
+    return res.status(200).json(cotizaciones);
+  } catch (error: any) {
+    console.error('Error al obtener las cotizaciones:', error.message);
+    return res.status(500).json({ error: 'No se pudieron obtener las cotizaciones.' });
+  }
+});
+
+app.post('/api/admin/cotizaciones', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { marca, modelo, almacenamientoColor, precioContado, plazoSemanas, enganche, pagoSemanal } = req.body;
+    if (!marca || !modelo || !precioContado || !plazoSemanas || enganche == null || !pagoSemanal) {
+      return res.status(400).json({ error: 'Faltan datos de la cotización.' });
+    }
+
+    const guardada = await PersistenceService.guardarCotizacionInterna({
+      marca, modelo, almacenamiento_color: almacenamientoColor || null,
+      precio_contado: precioContado, plazo_semanas: plazoSemanas, enganche, pago_semanal: pagoSemanal
+    });
+    return res.status(201).json(guardada);
+  } catch (error: any) {
+    console.error('Error al guardar la cotización:', error.message);
+    return res.status(500).json({ error: 'No se pudo guardar la cotización.' });
+  }
+});
+
+app.delete('/api/admin/cotizaciones/:id', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    await PersistenceService.eliminarCotizacionInterna(req.params.id);
+    return res.status(200).json({ success: true });
+  } catch (error: any) {
+    console.error('Error al eliminar la cotización:', error.message);
+    return res.status(500).json({ error: 'No se pudo eliminar la cotización.' });
+  }
+});
+
 // POST: Subir imagen de un celular al Storage de Supabase (el frontend ya no habla con Supabase directo)
 app.post('/api/celulares/imagen', requireAdminAuth, async (req: Request, res: Response) => {
   try {

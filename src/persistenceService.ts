@@ -863,4 +863,83 @@ export class PersistenceService {
     if (error) throw error;
     return data[0];
   }
+
+  // Parámetros de negocio (enganche/tasa/IVA/cargo semanal) que hasta ahora estaban
+  // hardcodeados en catalogo-view.tsx — fila única ('default'), igual que el mockup de
+  // referencia. Si la fila no existe todavía (antes de correr la migración con su
+  // INSERT inicial), se devuelven los mismos valores que estaban hardcodeados, para que
+  // nada se rompa mientras tanto.
+  static async getConfiguracion() {
+    const { data, error } = await supabase
+      .from('configuracion')
+      .select('*')
+      .eq('id', 'default')
+      .maybeSingle();
+
+    if (error) throw error;
+    return data || {
+      id: 'default',
+      enganche_pct: 0.15,
+      tasa_anual_pct: 2.28,
+      iva_pct: 0.16,
+      cargo_semanal_nombre: 'Servicio de Seguridad y Bloqueo',
+      cargo_semanal_monto: 17
+    };
+  }
+
+  static async actualizarConfiguracion(datos: {
+    enganche_pct: number;
+    tasa_anual_pct: number;
+    iva_pct: number;
+    cargo_semanal_nombre: string;
+    cargo_semanal_monto: number;
+  }) {
+    const { data, error } = await supabase
+      .from('configuracion')
+      .upsert({ id: 'default', ...datos, updated_at: new Date().toISOString() })
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Registro de cotizaciones armadas desde el Cotizador interno de /sadmin — solo
+  // referencia/historial para el equipo, no crea ninguna solicitud ni crédito real.
+  static async guardarCotizacionInterna(datos: {
+    marca: string;
+    modelo: string;
+    almacenamiento_color?: string;
+    precio_contado: number;
+    plazo_semanas: number;
+    enganche: number;
+    pago_semanal: number;
+  }) {
+    const { data, error } = await supabase
+      .from('cotizaciones_internas')
+      .insert(datos)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  static async getCotizacionesInternas() {
+    const { data, error } = await supabase
+      .from('cotizaciones_internas')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+    return data;
+  }
+
+  static async eliminarCotizacionInterna(id: string) {
+    const { error } = await supabase
+      .from('cotizaciones_internas')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+  }
 }
