@@ -550,10 +550,10 @@ app.patch('/api/solicitudes/:id/progreso', async (req: Request, res: Response) =
 // Skydropx con la dirección ya guardada en el paso 4 y avisa por WhatsApp. Compartida
 // entre el webhook de Verificamex y el PATCH manual del admin, para no repetir la
 // lógica de "aprobar + disparar Skydropx" en dos lugares.
-async function aprobarYActivarEnvio(solicitud: any) {
+async function aprobarYActivarEnvio(solicitud: any, verificamexResult?: number | null, verificamexComments?: string | null) {
   // Compare-and-swap: si devuelve null es que otro camino (webhook o polling) ya la
   // aprobó, y seguir de largo generaría una segunda guía de Skydropx por el mismo envío.
-  const aprobada = await PersistenceService.aprobarVerificacion(solicitud.id);
+  const aprobada = await PersistenceService.aprobarVerificacion(solicitud.id, verificamexResult, verificamexComments);
   if (!aprobada) {
     console.log(`[Verificación] La solicitud ${solicitud.id} ya había sido aprobada por otro camino — no se vuelve a generar el envío.`);
     return;
@@ -1442,7 +1442,7 @@ app.get('/api/solicitudes/:id/estado-verificacion', async (req: Request, res: Re
       const sesion = await VerificamexService.consultarSesion(solicitud.verificamex_session_id);
       if (sesion && sesion.status !== solicitud.verificamex_status) {
         console.log(`[Verificamex] Polling: la sesión ${solicitud.verificamex_session_id} pasó a ${sesion.status}${sesion.comments ? ` (${sesion.comments})` : ''}.`);
-        await procesarResultadoVerificamex(solicitud, sesion.status);
+        await procesarResultadoVerificamex(solicitud, sesion.status, sesion.result, sesion.comments);
         solicitud = await PersistenceService.getSolicitudById(id);
       }
     }
@@ -1465,7 +1465,7 @@ app.get('/api/solicitudes/:id/estado-verificacion', async (req: Request, res: Re
 // lugar. Es idempotente para los estados finales: si ya se procesó antes (estatus fuera
 // de "Verificando identidad", o verificamex_status ya final) no vuelve a disparar
 // Skydropx ni a contar el fallo de nuevo.
-async function procesarResultadoVerificamex(solicitud: any, status: string | undefined) {
+async function procesarResultadoVerificamex(solicitud: any, status: string | undefined, result?: number | null, comments?: string | null) {
   if (status !== 'FINISHED' && status !== 'FAILED') {
     return; // OPEN/VERIFYING: todavía en curso, nada que hacer.
   }
@@ -1476,7 +1476,7 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
   }
 
   if (status === 'FINISHED') {
-    await aprobarYActivarEnvio(solicitud);
+    await aprobarYActivarEnvio(solicitud, result, comments);
     return;
   }
 
@@ -1487,7 +1487,7 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
     return;
   }
 
-  const intentos = await PersistenceService.registrarFalloVerificamex(solicitud.id);
+  const intentos = await PersistenceService.registrarFalloVerificamex(solicitud.id, result, comments);
   if (intentos === null) {
     console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} lo registró otro camino en paralelo — no se cuenta dos veces.`);
     return;
@@ -1517,6 +1517,8 @@ app.post('/api/webhooks/verificamex', async (req: Request, res: Response) => {
     const status: string | undefined = sesion?.status;
     const sessionId: string | undefined = sesion?.id;
     const solicitudId: string | undefined = sesion?.optionals?.solicitud_id;
+    const result: number | null = sesion?.result ?? null;
+    const comments: string | null = sesion?.comments ?? null;
 
     console.log(`[Verificamex Webhook] Sesión ${sessionId} (solicitud ${solicitudId}) → status: ${status}`);
 
@@ -1529,7 +1531,7 @@ app.post('/api/webhooks/verificamex', async (req: Request, res: Response) => {
       return res.status(200).json({ received: true });
     }
 
-    await procesarResultadoVerificamex(solicitud, status);
+    await procesarResultadoVerificamex(solicitud, status, result, comments);
 
     return res.status(200).json({ received: true });
   } catch (error: any) {
