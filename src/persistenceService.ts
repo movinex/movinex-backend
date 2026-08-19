@@ -282,13 +282,13 @@ export class PersistenceService {
   // Devuelve el número de intento ya consumido, o `null` si otro proceso (webhook vs
   // polling, que pueden llegar juntos) ya había contado este mismo fallo — el `.neq`
   // hace que solo uno de los dos gane, así un rechazo no consume dos de los 3 intentos.
-  static async registrarFalloVerificamex(id: string, result?: number | null, comments?: string | null): Promise<number | null> {
+  static async registrarFalloVerificamex(id: string, result?: number | null, comments?: string | null, errores?: any[] | null): Promise<number | null> {
     const solicitud = await this.getSolicitudById(id);
     const intentos = Number(solicitud?.verificamex_intentos || 0) + 1;
 
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ verificamex_intentos: intentos, verificamex_status: 'FAILED', verificamex_result: result ?? null, verificamex_comments: comments ?? null })
+      .update({ verificamex_intentos: intentos, verificamex_status: 'FAILED', verificamex_result: result ?? null, verificamex_comments: comments ?? null, verificamex_errores: errores ?? null })
       .eq('id', id)
       .neq('verificamex_status', 'FAILED')
       .select();
@@ -305,10 +305,10 @@ export class PersistenceService {
   // pueden llegar al mismo tiempo con el mismo resultado, y sin esto los dos pasarían el
   // chequeo previo y dispararían Skydropx dos veces — dos guías reales cobradas por el
   // mismo paquete. Devuelve null si otro proceso ya la movió, y ahí el caller no hace nada.
-  static async aprobarVerificacion(id: string, result?: number | null, comments?: string | null) {
+  static async aprobarVerificacion(id: string, result?: number | null, comments?: string | null, errores?: any[] | null) {
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ ocr_ok: true, biometrico_ok: true, estatus: 'Preparando paquete', verificamex_status: 'FINISHED', verificamex_result: result ?? null, verificamex_comments: comments ?? null })
+      .update({ ocr_ok: true, biometrico_ok: true, estatus: 'Preparando paquete', verificamex_status: 'FINISHED', verificamex_result: result ?? null, verificamex_comments: comments ?? null, verificamex_errores: errores ?? null })
       .eq('id', id)
       // 'Aprobado' cubre la aprobación manual del admin, que ya movió el estatus antes de
       // llegar acá; 'Verificando identidad' es el camino automático.

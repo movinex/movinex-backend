@@ -265,7 +265,7 @@ export class VerificamexService {
    * Devuelve `null` si no se pudo consultar — el caller trata eso como "todavía no se
    * sabe" y reintenta después, nunca como un rechazo.
    */
-  static async consultarSesion(sessionId: string): Promise<{ status: string; result: number | null; comments: string | null } | null> {
+  static async consultarSesion(sessionId: string): Promise<{ status: string; result: number | null; comments: string | null; errores: any[] | null } | null> {
     if (!this.API_KEY) return null;
 
     try {
@@ -283,7 +283,7 @@ export class VerificamexService {
       const sesion = response.data?.data;
       if (!sesion?.status) return null;
 
-      return { status: sesion.status, result: sesion.result ?? null, comments: sesion.comments ?? null };
+      return { status: sesion.status, result: sesion.result ?? null, comments: sesion.comments ?? null, errores: sesion.errors ?? null };
     } catch (error: any) {
       console.error(`[Verificamex] No se pudo consultar la sesión ${sessionId}:`, error.response?.data || error.message);
       return null;
