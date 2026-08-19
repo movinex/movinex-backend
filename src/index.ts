@@ -1691,19 +1691,19 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
     console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} lo registró otro camino en paralelo — no se cuenta dos veces.`);
     return;
   }
-  console.log(`[Verificamex] Verificación fallida para la solicitud ${solicitud.id} (intento ${intentos} de 3).`);
+  console.log(`[Verificamex] Verificación fallida para la solicitud ${solicitud.id} (intento ${intentos}).`);
 
-  if (intentos >= 3) {
-    await PersistenceService.escalarRevisionManual(solicitud.id);
-    try {
-      await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
-    } catch (whatsappError: any) {
-      console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
-    }
+  // Sin reintentos automáticos: cualquier rechazo (puntaje bajo, FAILED real de
+  // Verificamex) escala directo a revisión manual desde el primer intento — decisión
+  // explícita del usuario 2026-08-19, mismo criterio que ya se usa para el CURP no
+  // coincidente más arriba. `verificamex_intentos` se sigue incrementando solo como
+  // historial/auditoría, ya no como gate para decidir cuándo escalar.
+  await PersistenceService.escalarRevisionManual(solicitud.id);
+  try {
+    await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
+  } catch (whatsappError: any) {
+    console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
   }
-  // Con intentos disponibles no se manda WhatsApp acá: la pantalla /verificacion ya
-  // ofrece "Intentar de nuevo" al toque. El aviso (movinex_verificacion_reintentar) es
-  // solo el respaldo diario del cron de acompañamiento, por si abandonó el navegador.
 }
 
 // Webhook real de Verificamex: recibe el objeto VerificationSession actualizado cada

@@ -80,27 +80,21 @@ export class AcompanamientoService {
     await PersistenceService.registrarRecordatorioEnviado(s.id, 'pago_pendiente');
   }
 
-  // Paso 6→7: ya pagó, falta la verificación en vivo (o falló y le quedan reintentos) —
-  // el más urgente de todos, recordatorio diario mientras siga sin resolverse.
+  // Paso 6→7: ya pagó, todavía no arrancó la verificación en vivo — el más urgente de
+  // todos, recordatorio diario mientras siga sin resolverse. Ya no cubre el caso "falló
+  // y le quedan reintentos": desde 2026-08-19 cualquier rechazo escala directo a
+  // revisión manual (estatus pasa a "Pendiente"), así que una solicitud con
+  // verificamex_status FAILED nunca sigue en "Verificando identidad" para que este
+  // método la vea.
   private static async procesarVerificandoIdentidad(s: any, ahora: number, origin: string): Promise<void> {
     if (this.yaLeTocoHoy(s, ahora)) return;
-
-    const noIntentoTodavia = !s.verificamex_session_id;
-    const falloConReintentosDisponibles = s.verificamex_status === 'FAILED' && Number(s.verificamex_intentos || 0) < 3;
-    if (!noIntentoTodavia && !falloConReintentosDisponibles) return;
+    if (s.verificamex_session_id) return;
 
     const referencia = s.pago_confirmado_at ? new Date(s.pago_confirmado_at).getTime() : new Date(s.created_at).getTime();
     const transcurrido = ahora - referencia;
-    const link = `${origin}/verificacion?solicitud=${s.id}&modelo=${encodeURIComponent(s.modelo)}`;
-
-    if (falloConReintentosDisponibles) {
-      if (transcurrido < 30 * 60 * 1000) return;
-      await WhatsappOtpService.enviarVerificacionReintentar(s.celular, s.cliente, link);
-      await PersistenceService.registrarRecordatorioEnviado(s.id, 'verificacion_reintentar');
-      return;
-    }
-
     if (transcurrido < HORA_MS) return;
+
+    const link = `${origin}/verificacion?solicitud=${s.id}&modelo=${encodeURIComponent(s.modelo)}`;
     await WhatsappOtpService.enviarVerificacionPendiente(s.celular, s.cliente, s.modelo, link);
     await PersistenceService.registrarRecordatorioEnviado(s.id, 'verificacion_pendiente');
   }
