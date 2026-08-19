@@ -336,6 +336,55 @@ export class StripeService {
   }
 
   /**
+   * Link de pago único para cuando el cobro automático de tarjeta falla
+   * (invoice.payment_failed) — la Subscription sigue reintentando sola en el fondo, esto
+   * es solo un camino alternativo para que el cliente pague esta semana sin esperar a
+   * que Stripe reintente. Mismo patrón que `crearPagoSemanalOxxo` (Checkout Session
+   * puntual, no ligada a la Subscription), pero ofreciendo tarjeta en vez de OXXO.
+   * `metadata.tipo: 'cobro_semanal'` es el mismo tag que ya usa OXXO — el webhook lo
+   * procesa igual sin importar el método (`registrarPagoSemanalManual`, ver index.ts).
+   */
+  static async crearLinkReintentoTarjeta(
+    solicitudId: string,
+    customerId: string,
+    monto: number,
+    numeroSemana: number,
+    origin: string,
+    usarProduccion: boolean
+  ): Promise<{ sessionId: string; url: string }> {
+    console.log(`[Stripe] Creando link de reintento de tarjeta semana #${numeroSemana} por $${monto} MXN para ${customerId}`);
+
+    const session = await this.getClient(usarProduccion).checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      customer: customerId,
+      line_items: [
+        {
+          price_data: {
+            currency: 'mxn',
+            product_data: { name: `Pago semanal Movinex #${numeroSemana}` },
+            unit_amount: Math.round(monto * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        solicitud_id: solicitudId,
+        tipo: 'cobro_semanal',
+        numero_semana: String(numeroSemana),
+      },
+      success_url: `${origin}/`,
+      cancel_url: `${origin}/`,
+    });
+
+    if (!session.url) {
+      throw new Error('Stripe no devolvió una URL de checkout para el link de reintento de tarjeta.');
+    }
+
+    return { sessionId: session.id, url: session.url };
+  }
+
+  /**
    * Cancela la Subscription semanal (tarjeta o saldo/CLABE, da igual — ambas se
    * cancelan igual) una vez que el cliente terminó de pagar su plan (26 o 52
    * semanas). Sin esto, Stripe seguiría cobrando cada semana indefinidamente:

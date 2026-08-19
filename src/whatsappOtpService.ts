@@ -10,6 +10,7 @@ export class WhatsappOtpService {
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
   private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
   private static COBRO_OXXO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_OXXO_TEMPLATE_NAME || 'movinex_cobro_semanal_oxxo';
+  private static COBRO_TARJETA_FALLIDA_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TARJETA_FALLIDA_TEMPLATE_NAME || 'movinex_cobro_tarjeta_fallida';
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
   private static ENVIADO_TEMPLATE_NAME = process.env.WHATSAPP_ENVIADO_TEMPLATE_NAME || 'movinex_pedido_enviado';
   private static ENTREGADO_TEMPLATE_NAME = process.env.WHATSAPP_ENTREGADO_TEMPLATE_NAME || 'movinex_pedido_entregado';
@@ -267,6 +268,62 @@ export class WhatsappOtpService {
     } catch (error: any) {
       console.error('[WhatsApp Cobro Semanal OXXO] Error al enviar el link:', error.response?.data || error.message);
       throw new Error('No se pudo enviar el link de pago semanal (OXXO) por WhatsApp.');
+    }
+  }
+
+  /**
+   * Avisa que el cobro automático de tarjeta falló, con un link de pago alternativo
+   * (`StripeService.crearLinkReintentoTarjeta`) para esa semana. Necesita su propia
+   * plantilla — Meta la tiene que aprobar antes de que esto salga real; hasta entonces
+   * queda en modo mock como cualquier plantilla sin aprobar.
+   */
+  static async enviarLinkReintentoTarjeta(
+    celular: string,
+    cliente: string,
+    link: string,
+    monto: number,
+    numeroSemana: number
+  ): Promise<{ mock: boolean }> {
+    if (this.MOCK) {
+      console.log(`[WhatsApp Cobro Tarjeta Fallida MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN, link: ${link}`);
+      return { mock: true };
+    }
+
+    try {
+      await axios.post(
+        `${this.GRAPH_URL}/${this.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: 'whatsapp',
+          to: this.formatearNumero(celular),
+          type: 'template',
+          template: {
+            name: this.COBRO_TARJETA_FALLIDA_TEMPLATE_NAME,
+            language: { code: 'es_MX' },
+            components: [
+              {
+                type: 'body',
+                parameters: [
+                  { type: 'text', text: cliente },
+                  { type: 'text', text: String(numeroSemana) },
+                  { type: 'text', text: monto.toLocaleString('es-MX') },
+                  { type: 'text', text: link }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${this.ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      console.log(`[WhatsApp Cobro Tarjeta Fallida] Link de reintento de la semana #${numeroSemana} enviado a ${celular}.`);
+      return { mock: false };
+    } catch (error: any) {
+      console.error('[WhatsApp Cobro Tarjeta Fallida] Error al enviar el link:', error.response?.data || error.message);
+      throw new Error('No se pudo enviar el link de reintento de tarjeta por WhatsApp.');
     }
   }
 

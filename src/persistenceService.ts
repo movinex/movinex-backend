@@ -462,15 +462,29 @@ export class PersistenceService {
   // Programa cuándo debe salir el próximo link de pago semanal por WhatsApp — lo usa
   // tanto el webhook (primer cobro, 7 días después del enganche, igual que el trial de
   // la Subscription) como cobrosSemanalesService (siguiente cobro, tras mandar un link).
+  // También limpia cobro_semanal_fallido: si se está programando el próximo cobro es
+  // porque el actual quedó resuelto (pagado), sea cual sea el método.
   static async programarProximoCobroSemanal(id: string, fecha: Date) {
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ proximo_cobro_semanal: fecha.toISOString() })
+      .update({ proximo_cobro_semanal: fecha.toISOString(), cobro_semanal_fallido: false })
       .eq('id', id)
       .select();
 
     if (error) throw error;
     return data[0];
+  }
+
+  // El cobro automático de tarjeta falló (invoice.payment_failed) — deja la solicitud
+  // visiblemente marcada en Cobranza en vez de mostrar la próxima fecha como si nada,
+  // mientras se manda un link de pago de respaldo (ver StripeService.crearLinkReintentoTarjeta).
+  static async marcarCobroSemanalFallido(id: string) {
+    const { error } = await supabase
+      .from('solicitudes')
+      .update({ cobro_semanal_fallido: true })
+      .eq('id', id);
+
+    if (error) throw error;
   }
 
   // Trae las solicitudes que pagaron el enganche por SPEI (customer_balance) y les toca

@@ -1305,6 +1305,9 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
               usarProduccion
             );
             await PersistenceService.guardarSuscripcionStripe(solicitud.id, customerId, subscriptionId);
+            // Igual que OXXO/SPEI arriba: el primer cobro real vence en 7 días (fin del
+            // trial) — sin esto Cobranza no tenía ninguna fecha que mostrar para tarjeta.
+            await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
             console.log(`[Stripe Webhook] Suscripción semanal ${subscriptionId} creada para la solicitud ${solicitud.id}.`);
           }
         } catch (subError: any) {
@@ -1367,6 +1370,49 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         } catch (cancelError: any) {
           console.error(`[Stripe Webhook] No se pudo cancelar la Subscription de la solicitud ${solicitudId} tras completar el plan: ${cancelError.message}`);
         }
+      } else {
+        // Tarjeta: a diferencia de OXXO/SPEI (donde el cron ya programa la próxima fecha
+        // al mandar el recordatorio/voucher), acá el invoice.paid es la única señal de
+        // que tocaba cobrar esta semana — se aprovecha para dejar la próxima fecha
+        // visible en Cobranza y limpiar cualquier marca de cobro fallido previa.
+        await PersistenceService.programarProximoCobroSemanal(solicitudId, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      }
+    } else if (event.type === 'invoice.payment_failed') {
+      // El cobro automático de tarjeta falló — Stripe reintenta solo en el fondo (Smart
+      // Retries), pero el equipo no tenía ninguna visibilidad ni forma de mandarle un
+      // link alternativo al cliente. Solo aplica a tarjeta: SPEI/OXXO no tienen un cargo
+      // automático que pueda "fallar" de esta forma (send_invoice espera saldo, no cobra).
+      const invoice = event.data.object as any;
+      const solicitudId: string | undefined = invoice.parent?.subscription_details?.metadata?.solicitud_id;
+
+      if (!solicitudId) {
+        console.log(`[Stripe Webhook] invoice.payment_failed ${invoice.id} sin solicitud_id — se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
+      const solicitud = await PersistenceService.getSolicitudById(solicitudId);
+      if (!solicitud || solicitud.metodo_pago_enganche !== 'card' || !solicitud.stripe_customer_id) {
+        console.log(`[Stripe Webhook] invoice.payment_failed ${invoice.id} de la solicitud ${solicitudId} no es de una Subscription de tarjeta con customer guardado — se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
+      console.warn(`[Stripe Webhook] Falló el cobro automático de tarjeta para la solicitud ${solicitudId} (invoice ${invoice.id}).`);
+      await PersistenceService.marcarCobroSemanalFallido(solicitudId);
+
+      try {
+        const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
+        const { url } = await StripeService.crearLinkReintentoTarjeta(
+          solicitudId,
+          solicitud.stripe_customer_id,
+          Number(solicitud.pago_semanal),
+          numeroSemana,
+          ALLOWED_ORIGINS[0],
+          usarProduccion
+        );
+        await WhatsappOtpService.enviarLinkReintentoTarjeta(solicitud.celular, solicitud.cliente, url, Number(solicitud.pago_semanal), numeroSemana);
+        console.log(`[Stripe Webhook] Link de reintento de tarjeta generado y enviado para la solicitud ${solicitudId}.`);
+      } catch (fallbackError: any) {
+        console.error(`[Stripe Webhook] No se pudo generar/enviar el link de reintento de tarjeta para la solicitud ${solicitudId}: ${fallbackError.message}`);
       }
     }
 
