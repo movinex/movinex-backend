@@ -1632,19 +1632,38 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
     return;
   }
 
-  if (status === 'FINISHED') {
+  // Antes de aprobar, comparar el CURP que el cliente tipeó a mano (paso "Datos del
+  // cliente") contra el que Verificamex validó de verdad contra RENAPO — no el OCR
+  // crudo del INE, la consulta oficial. Si no coinciden, se trata igual que una
+  // verificación FALLIDA (mismo camino de reintentos/revisión manual de abajo), en vez
+  // de aprobar una identidad que no es la que el cliente dijo que era. `null` (no se
+  // pudo determinar — sesión mock, error de red) no cuenta como mismatch, solo se
+  // ignora el chequeo esa vez.
+  let statusEfectivo = status;
+  let commentsEfectivo = comments;
+  if (status === 'FINISHED' && solicitud.curp && solicitud.verificamex_session_id) {
+    const curpValidado = await VerificamexService.obtenerCurpValidado(solicitud.verificamex_session_id);
+    if (curpValidado && curpValidado !== String(solicitud.curp).trim().toUpperCase()) {
+      console.warn(`[Verificamex] CURP no coincide para la solicitud ${solicitud.id}: cliente tipeó "${solicitud.curp}", Verificamex validó "${curpValidado}".`);
+      statusEfectivo = 'FAILED';
+      commentsEfectivo = `El CURP capturado no coincide con el validado por RENAPO (documento: ${curpValidado}).`;
+    }
+  }
+
+  if (statusEfectivo === 'FINISHED') {
     await aprobarYActivarEnvio(solicitud, result, comments);
     return;
   }
 
-  // FAILED: si ya se contó este mismo fallo (el webhook y el polling pueden llegar los
-  // dos), no se vuelve a incrementar el contador de intentos.
+  // FAILED (incluye el CURP no coincidente de arriba): si ya se contó este mismo fallo
+  // (el webhook y el polling pueden llegar los dos), no se vuelve a incrementar el
+  // contador de intentos.
   if (solicitud.verificamex_status === 'FAILED') {
     console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} ya estaba registrado — no se cuenta dos veces.`);
     return;
   }
 
-  const intentos = await PersistenceService.registrarFalloVerificamex(solicitud.id, result, comments);
+  const intentos = await PersistenceService.registrarFalloVerificamex(solicitud.id, result, commentsEfectivo);
   if (intentos === null) {
     console.log(`[Verificamex] El fallo de la solicitud ${solicitud.id} lo registró otro camino en paralelo — no se cuenta dos veces.`);
     return;

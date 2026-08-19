@@ -289,4 +289,33 @@ export class VerificamexService {
       return null;
     }
   }
+
+  /**
+   * CURP que Verificamex validó contra RENAPO para una sesión ya FINISHED (no el OCR
+   * crudo del INE — `renapo.data.curp` es el resultado de la consulta oficial). Se usa
+   * para comparar contra el CURP que el cliente tipeó a mano en "Datos del cliente" —
+   * si no coinciden, la solicitud probablemente tiene un typo o una identidad
+   * distinta a la del documento escaneado. Devuelve null si no se pudo determinar
+   * (sesión mock, error de red, o RENAPO no devolvió nada) — el caller no debe tratar
+   * null como un mismatch, solo como "no se pudo verificar esto en particular".
+   */
+  static async obtenerCurpValidado(sessionId: string): Promise<string | null> {
+    if (!this.API_KEY || sessionId.startsWith('mock-')) return null;
+
+    try {
+      const response = await axios.get(
+        `${this.BASE_URL_V2}/identity/sessions/${sessionId}?include=renapo`,
+        {
+          headers: { Authorization: `Bearer ${this.API_KEY}`, Accept: 'application/json' },
+          timeout: 15000
+        }
+      );
+
+      const curp = response.data?.data?.renapo?.data?.curp;
+      return typeof curp === 'string' && curp.length > 0 ? curp.toUpperCase() : null;
+    } catch (error: any) {
+      console.error(`[Verificamex] No se pudo obtener el CURP validado de la sesión ${sessionId}:`, error.response?.data || error.message);
+      return null;
+    }
+  }
 }
