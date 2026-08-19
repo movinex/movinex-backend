@@ -936,6 +936,41 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
 // a armarse). No hay reembolso automático en ningún otro camino del flujo (ver
 // aprobarYActivarEnvio/escalarRevisionManual) — esta es la única vía de reembolso, y es
 // una decisión explícita del admin, no algo que dispare el sistema solo.
+// POST: genera a mano un link de pago de tarjeta para el cobro semanal de una solicitud
+// — mismo mecanismo que dispara invoice.payment_failed en el webhook
+// (StripeService.crearLinkReintentoTarjeta), pero disponible desde el panel sin esperar a
+// que Stripe avise (o mientras la plantilla de WhatsApp para el aviso automático todavía
+// no esté aprobada por Meta). El link no se manda solo por WhatsApp acá — se devuelve
+// para que el admin lo copie y lo mande a mano.
+app.post('/api/admin/solicitudes/:id/link-pago-tarjeta', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+    if (solicitud.metodo_pago_enganche !== 'card' || !solicitud.stripe_customer_id) {
+      return res.status(409).json({ error: 'Esta solicitud no tiene una suscripción de tarjeta activa.' });
+    }
+
+    const usarProduccion = StripeService.usaProduccion(solicitud.email);
+    const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
+    const { url } = await StripeService.crearLinkReintentoTarjeta(
+      id,
+      solicitud.stripe_customer_id,
+      Number(solicitud.pago_semanal),
+      numeroSemana,
+      ALLOWED_ORIGINS[0],
+      usarProduccion
+    );
+
+    return res.status(200).json({ url });
+  } catch (error: any) {
+    console.error('Error al generar el link de pago de tarjeta:', error.message);
+    return res.status(500).json({ error: error.message || 'No se pudo generar el link de pago.' });
+  }
+});
+
 app.post('/api/admin/solicitudes/:id/cancelar', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
