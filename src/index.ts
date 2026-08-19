@@ -84,6 +84,7 @@ const ALLOWED_ORIGINS = [
   'https://www.movinex.mx',
   'https://movinex.mx',
   'http://localhost:10173',
+  'http://localhost:50002',
 ];
 app.use(cors({
   origin: ALLOWED_ORIGINS,
@@ -581,7 +582,12 @@ async function aprobarYActivarEnvio(solicitud: any) {
   )
     .then(async ({ trackingNumber, labelUrl, shipmentId, carrier, simulado }) => {
       if (simulado) {
-        console.warn(`[Skydropx] Guía simulada para la solicitud ${solicitud.id} — la llamada real a Skydropx falló o no está configurada.`);
+        // No guardar un tracking falso — se veía indistinguible de uno real en el
+        // panel (caso real 2026-08-18: la guía nunca se generó y nadie lo notó hasta
+        // que el cliente reclamó). Se deja tracking_number/shipment_id vacíos para que
+        // la solicitud quede visiblemente sin guía hasta que alguien la regenere.
+        console.error(`[Skydropx] FALLÓ la generación real de la guía para la solicitud ${solicitud.id} — no se guardó ningún tracking, requiere atención manual.`);
+        return;
       }
       await PersistenceService.guardarEnvio(solicitud.id, { tracking_number: trackingNumber, label_url: labelUrl, skydropx_carrier: carrier, skydropx_shipment_id: shipmentId });
       console.log(`[Skydropx] Guía generada en segundo plano para la solicitud ${solicitud.id}: ${trackingNumber}`);

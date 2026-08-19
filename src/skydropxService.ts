@@ -85,9 +85,11 @@ export class SkydropxService {
   // fallar la guía real y cayó en silencio al tracking simulado sin que nadie se
   // enterara). Nombres compuestos + dos apellidos son comunes en México y superan el
   // límite seguido, así que se recorta por palabra completa en vez de dejar que la
-  // API rechace la guía entera.
-  private static truncarNombreDireccion(nombre: string, maxLen = 30): string {
-    const limpio = nombre.trim();
+  // API rechace la guía entera. Mismo problema encontrado 2026-08-18 con
+  // address_to.street1 (máximo 45 caracteres) — direcciones mexicanas con
+  // referencias "entre calle X y calle Y" lo superan seguido.
+  private static truncarCampoDireccion(texto: string, maxLen = 30): string {
+    const limpio = texto.trim();
     if (limpio.length <= maxLen) return limpio;
     const cortado = limpio.slice(0, maxLen);
     const ultimoEspacio = cortado.lastIndexOf(' ');
@@ -126,8 +128,8 @@ export class SkydropxService {
       const telefonoLimpio = telefono.replace(/\D/g, '');
 
       const addressTo = {
-        name: this.truncarNombreDireccion(cliente),
-        street1: domicilio.calle,
+        name: this.truncarCampoDireccion(cliente, 30),
+        street1: this.truncarCampoDireccion(domicilio.calle, 45),
         street_number: domicilio.numeroExterior,
         apartment_number: domicilio.numeroInterior || undefined,
         postal_code: domicilio.codigoPostal,
