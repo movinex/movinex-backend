@@ -1650,17 +1650,26 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
 
   // Antes de aprobar, comparar el CURP que el cliente tipeó a mano (paso "Datos del
   // cliente") contra el que Verificamex validó de verdad contra RENAPO — no el OCR
-  // crudo del INE, la consulta oficial. Si no coinciden, se trata igual que una
-  // verificación FALLIDA (mismo camino de reintentos/revisión manual de abajo), en vez
-  // de aprobar una identidad que no es la que el cliente dijo que era. `null` (no se
-  // pudo determinar — sesión mock, error de red) no cuenta como mismatch, solo se
-  // ignora el chequeo esa vez.
+  // crudo del INE, la consulta oficial. A diferencia de un puntaje bajo (arriba, que sí
+  // deja reintentar), un CURP que no coincide pasa DIRECTO a revisión manual sin gastar
+  // ninguno de los 3 intentos — decisión explícita del usuario: esto lo tiene que
+  // resolver el equipo de atención al cliente a mano en /sadmin, no queda librado a que
+  // el cliente reintente solo (podría ser un typo, pero también podría ser un documento
+  // de otra persona). `null` (no se pudo determinar — sesión mock, error de red) no
+  // cuenta como mismatch, solo se ignora el chequeo esa vez.
   if (statusEfectivo === 'FINISHED' && solicitud.curp && solicitud.verificamex_session_id) {
     const curpValidado = await VerificamexService.obtenerCurpValidado(solicitud.verificamex_session_id);
     if (curpValidado && curpValidado !== String(solicitud.curp).trim().toUpperCase()) {
-      console.warn(`[Verificamex] CURP no coincide para la solicitud ${solicitud.id}: cliente tipeó "${solicitud.curp}", Verificamex validó "${curpValidado}".`);
-      statusEfectivo = 'FAILED';
-      commentsEfectivo = `El CURP capturado no coincide con el validado por RENAPO (documento: ${curpValidado}).`;
+      console.warn(`[Verificamex] CURP no coincide para la solicitud ${solicitud.id}: cliente tipeó "${solicitud.curp}", Verificamex validó "${curpValidado}" — pasa directo a revisión manual, sin gastar reintentos.`);
+      const comentarioMismatch = `El CURP capturado (${solicitud.curp}) no coincide con el validado por RENAPO (${curpValidado}).`;
+      await PersistenceService.registrarFalloVerificamex(solicitud.id, result, comentarioMismatch, errores);
+      await PersistenceService.escalarRevisionManual(solicitud.id);
+      try {
+        await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
+      } catch (whatsappError: any) {
+        console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+      }
+      return;
     }
   }
 
