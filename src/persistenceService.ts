@@ -475,6 +475,27 @@ export class PersistenceService {
     return data[0];
   }
 
+  // Compare-and-swap para el cron de cobros semanales: reclama el turno de esta semana
+  // ANTES de mandar nada, no después. Si el update de acá adelante `proximo_cobro_semanal`
+  // no aplica sobre ninguna fila (porque otra corrida en paralelo — dos instancias de
+  // Railway solapadas durante un deploy, por ejemplo — ya lo reclamó primero), el `.eq`
+  // sobre el valor viejo no encuentra nada, `data` queda vacío y esta corrida se retira
+  // sin mandar el WhatsApp. Encontrado en vivo 2026-08-21: un cliente recibió el mismo
+  // recordatorio de CLABE dos veces a la misma hora porque el reclamo pasaba DESPUÉS del
+  // envío, así que las dos corridas alcanzaban a mandar antes de que ninguna actualizara
+  // la fecha.
+  static async reclamarCobroSemanal(id: string, vencimientoEsperado: string, siguienteFecha: Date): Promise<boolean> {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ proximo_cobro_semanal: siguienteFecha.toISOString(), cobro_semanal_fallido: false })
+      .eq('id', id)
+      .eq('proximo_cobro_semanal', vencimientoEsperado)
+      .select();
+
+    if (error) throw error;
+    return (data || []).length > 0;
+  }
+
   // El cobro automático de tarjeta falló (invoice.payment_failed) — deja la solicitud
   // visiblemente marcada en Cobranza en vez de mostrar la próxima fecha como si nada,
   // mientras se manda un link de pago de respaldo (ver StripeService.crearLinkReintentoTarjeta).
@@ -499,6 +520,7 @@ export class PersistenceService {
       .select('*')
       .eq('metodo_pago_enganche', 'customer_balance')
       .eq('pago_confirmado', true)
+      .not('estatus', 'in', '("Cancelada","Rechazado")')
       .lte('proximo_cobro_semanal', new Date().toISOString());
 
     if (error) throw error;
@@ -515,6 +537,7 @@ export class PersistenceService {
       .select('*')
       .eq('metodo_pago_enganche', 'oxxo')
       .eq('pago_confirmado', true)
+      .not('estatus', 'in', '("Cancelada","Rechazado")')
       .lte('proximo_cobro_semanal', new Date().toISOString());
 
     if (error) throw error;
