@@ -1519,6 +1519,20 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
+      // Nunca cobrarle ni escribirle a alguien que ya canceló. No debería llegar acá
+      // (cancelarSolicitud cancela la Subscription en Stripe), pero esa llamada se traga
+      // sus errores y solo los loguea: si alguna vez falla, la Subscription queda viva,
+      // Stripe la reintenta, y sin este guard le mandaríamos un link de pago a un cliente
+      // cancelado. Mismo criterio que el cron de cobranza semanal
+      // (getSolicitudesConCobroSpeiPendiente/Oxxo en persistenceService.ts).
+      if (solicitud.estatus === 'Cancelada' || solicitud.estatus === 'Rechazado') {
+        console.warn(
+          `[Stripe Webhook] invoice.payment_failed ${invoice.id} de la solicitud ${solicitudId}, que está en "${solicitud.estatus}" — ` +
+          `no se le avisa nada al cliente. Revisar por qué su Subscription ${solicitud.stripe_subscription_id} sigue viva en Stripe.`
+        );
+        return res.status(200).json({ received: true });
+      }
+
       console.warn(`[Stripe Webhook] Falló el cobro automático de tarjeta para la solicitud ${solicitudId} (invoice ${invoice.id}).`);
       await PersistenceService.marcarCobroSemanalFallido(solicitudId);
 
