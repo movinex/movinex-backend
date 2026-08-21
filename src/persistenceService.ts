@@ -554,6 +554,106 @@ export class PersistenceService {
     return { semanas_pagadas: semanasPagadas, semanas: Number(data[0].semanas), yaProcesada: false };
   }
 
+  // ---------------------------------------------------------------------------
+  // Historial de pagos (tabla `pagos`, ver scripts/migraciones/2026-08-pagos.sql)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Deja una fila por cobro. `stripe_id` es UNIQUE, así que esto es idempotente: el
+   * webhook y el backfill pueden pisarse sin duplicar.
+   *
+   * **Nunca lanza.** Guardar el historial no puede tumbar el procesamiento de un pago:
+   * si esto falla, el cobro igual se aplicó (semanas_pagadas ya avanzó) y lo que se
+   * pierde es una fila de auditoría, que el backfill puede recuperar después desde
+   * Stripe. Mismo criterio que la bitácora de autovia-dashboard.
+   *
+   * @returns true si insertó, false si ya existía o si falló.
+   */
+  static async registrarPago(pago: {
+    solicitudId: string;
+    tipo: 'enganche' | 'semanal';
+    numeroSemana?: number | null;
+    monto: number;
+    fecha: Date | string;
+    metodo?: string | null;
+    estado?: 'pagado' | 'fallido' | 'reembolsado';
+    stripeId: string;
+    origen?: 'webhook' | 'backfill';
+  }): Promise<boolean> {
+    try {
+      const { data, error } = await supabase
+        .from('pagos')
+        .upsert(
+          {
+            solicitud_id: pago.solicitudId,
+            tipo: pago.tipo,
+            numero_semana: pago.numeroSemana ?? null,
+            monto: pago.monto,
+            fecha: pago.fecha instanceof Date ? pago.fecha.toISOString() : pago.fecha,
+            metodo: pago.metodo ?? null,
+            estado: pago.estado || 'pagado',
+            stripe_id: pago.stripeId,
+            origen: pago.origen || 'webhook'
+          },
+          { onConflict: 'stripe_id', ignoreDuplicates: true }
+        )
+        .select();
+
+      if (error) throw error;
+      // Con ignoreDuplicates, un choque devuelve el array vacío en vez de error.
+      return (data || []).length > 0;
+    } catch (error: any) {
+      console.error(`[Pagos] No se pudo registrar el pago ${pago.stripeId}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Las solicitudes que el tablero de cartera necesita, sin las columnas de KYC ni las
+   * URLs firmadas — solo los datos del crédito. Se traen también las canceladas y
+   * rechazadas: la analítica de originación las cuenta.
+   */
+  static async getSolicitudesParaCartera() {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .select(
+        'id, cliente, curp, celular, email, modelo, enganche, semanas, pago_semanal, costo_envio, ' +
+        'estatus, created_at, pago_confirmado, pago_confirmado_at, semanas_pagadas, ' +
+        'proximo_cobro_semanal, cobro_semanal_fallido, metodo_pago_enganche, imei, ' +
+        'stripe_subscription_id, stripe_clabe_referencia'
+      )
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  /** Todos los pagos de una solicitud, del más viejo al más nuevo. */
+  static async getPagosDeSolicitud(solicitudId: string) {
+    const { data, error } = await supabase
+      .from('pagos')
+      .select('*')
+      .eq('solicitud_id', solicitudId)
+      .order('fecha', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  }
+
+  /**
+   * Todos los pagos de toda la cartera, de un tirón — el tablero necesita cruzarlos
+   * contra las solicitudes en memoria, y traerlos uno por uno sería N+1.
+   */
+  static async getTodosLosPagos() {
+    const { data, error } = await supabase
+      .from('pagos')
+      .select('*')
+      .order('fecha', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  }
+
   // Guarda el tracking/guía real generados por Skydropx, sin tocar el estatus — el
   // estatus lo mueve el admin a mano (o el webhook de pago), no la generación de la guía.
   static async guardarEnvio(id: string, datos: { tracking_number?: string; label_url?: string | null; skydropx_carrier?: string; skydropx_shipment_id?: string }) {

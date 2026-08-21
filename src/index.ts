@@ -1063,6 +1063,28 @@ app.post('/api/admin/login', loginLimiter, async (req: Request, res: Response) =
 // catalogo-view.tsx al calcular precios sugeridos — antes hardcodeados en el frontend.
 // Cambiar esto solo afecta a celulares que se agreguen/reguarden desde ahora; los que
 // ya están en el catálogo conservan sus montos guardados hasta que alguien los reguarde.
+/**
+ * Fuente de datos del tablero de cartera de /sadmin: las solicitudes con el enganche
+ * pagado más TODOS sus pagos, en una sola respuesta.
+ *
+ * No se reusa GET /api/solicitudes a propósito: ese firma una URL del bucket de KYC por
+ * cada fila (ver PersistenceService.getSolicitudes), lo que lo hace lento a medida que
+ * crece la cartera y encima manda documentos de identidad a una pantalla de analítica
+ * que no los necesita. Acá se seleccionan solo las columnas del crédito.
+ */
+app.get('/api/admin/cartera', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const [solicitudes, pagos] = await Promise.all([
+      PersistenceService.getSolicitudesParaCartera(),
+      PersistenceService.getTodosLosPagos()
+    ]);
+    return res.status(200).json({ solicitudes, pagos });
+  } catch (error: any) {
+    console.error('Error al obtener la cartera:', error.message);
+    return res.status(500).json({ error: 'No se pudo obtener la cartera.' });
+  }
+});
+
 app.get('/api/admin/configuracion', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const config = await PersistenceService.getConfiguracion();
@@ -1327,6 +1349,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           return res.status(200).json({ received: true });
         }
         console.log(`[Stripe Webhook] Pago semanal OXXO confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+        // Las semanas de OXXO no generan invoice (cada una es una Session suelta), así
+        // que esta es la única forma de que queden en el historial.
+        await PersistenceService.registrarPago({
+          solicitudId,
+          tipo: 'semanal',
+          numeroSemana: Number(session.metadata?.numero_semana) || resultado.semanas_pagadas,
+          monto: Number(session.amount_total || 0) / 100,
+          fecha: new Date(),
+          metodo: 'oxxo',
+          stripeId: session.id
+        });
         return res.status(200).json({ received: true });
       }
 
@@ -1355,6 +1388,18 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           if (receiptUrl) {
             await PersistenceService.guardarReciboPago(solicitud.id, receiptUrl);
           }
+
+          // El enganche va al historial con el monto REAL cobrado (amount_total, que
+          // incluye el costo de envío si lo hubo), no con la columna `enganche` — para
+          // el flujo de caja importa lo que entró, no lo que se había presupuestado.
+          await PersistenceService.registrarPago({
+            solicitudId: solicitud.id,
+            tipo: 'enganche',
+            monto: Number(session.amount_total || 0) / 100,
+            fecha: new Date(),
+            metodo: tipo,
+            stripeId: paymentIntentId
+          });
 
           if (tipo === 'oxxo') {
             await PersistenceService.guardarStripeCustomerId(solicitud.id, customerId);
@@ -1466,6 +1511,19 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
       console.log(`[Stripe Webhook] Pago semanal confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
 
+      // Fecha de CAJA real: `status_transitions.paid_at` es cuándo se acreditó de verdad,
+      // que en SPEI puede ser días después de emitida la factura. Viene en segundos.
+      const pagadaEn = invoice.status_transitions?.paid_at;
+      await PersistenceService.registrarPago({
+        solicitudId,
+        tipo: 'semanal',
+        numeroSemana: resultado.semanas_pagadas,
+        monto: Number(invoice.amount_paid) / 100,
+        fecha: pagadaEn ? new Date(pagadaEn * 1000) : new Date(),
+        metodo: invoice.collection_method === 'send_invoice' ? 'customer_balance' : 'card',
+        stripeId: invoice.id
+      });
+
       // Plan completo: cancelar la Subscription para que Stripe deje de cobrar — no
       // trae `cancel_at` propio, así que sin esto seguiría facturando cada semana
       // indefinidamente.
@@ -1509,6 +1567,19 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
       console.warn(`[Stripe Webhook] Falló el cobro automático de tarjeta para la solicitud ${solicitudId} (invoice ${invoice.id}).`);
       await PersistenceService.marcarCobroSemanalFallido(solicitudId);
+
+      // Queda en el historial como intento fallido: no suma a lo cobrado, pero deja ver
+      // cuántas veces rebotó la tarjeta de un cliente antes de que pagara.
+      await PersistenceService.registrarPago({
+        solicitudId,
+        tipo: 'semanal',
+        numeroSemana: Number(solicitud.semanas_pagadas || 0) + 1,
+        monto: Number(invoice.amount_due || 0) / 100,
+        fecha: new Date(),
+        metodo: 'card',
+        estado: 'fallido',
+        stripeId: `${invoice.id}_fallido_${invoice.attempt_count || 0}`
+      });
 
       try {
         const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
