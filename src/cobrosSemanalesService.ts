@@ -27,6 +27,16 @@ export class CobrosSemanalesService {
     for (const solicitud of pendientes) {
       const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
       try {
+        // Reclama el turno ANTES de mandar nada — si otra corrida en paralelo ya lo tomó,
+        // se retira sin duplicar el WhatsApp (ver el comentario en persistenceService.ts).
+        const reclamado = await PersistenceService.reclamarCobroSemanal(
+          solicitud.id, solicitud.proximo_cobro_semanal, new Date(Date.now() + SIETE_DIAS_MS)
+        );
+        if (!reclamado) {
+          console.log(`[Cobros Semanales SPEI] La solicitud ${solicitud.id} ya la tomó otra corrida en paralelo — se omite.`);
+          continue;
+        }
+
         if (!solicitud.stripe_clabe_referencia) {
           throw new Error('La solicitud no tiene una CLABE de referencia asignada todavía.');
         }
@@ -39,7 +49,6 @@ export class CobrosSemanalesService {
           numeroSemana
         );
 
-        await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + SIETE_DIAS_MS));
         console.log(`[Cobros Semanales SPEI] Recordatorio #${numeroSemana} enviado para la solicitud ${solicitud.id}.`);
         procesadas++;
       } catch (error: any) {
@@ -73,6 +82,15 @@ export class CobrosSemanalesService {
     for (const solicitud of pendientes) {
       const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
       try {
+        // Mismo reclamo atómico que la rama SPEI, antes de generar nada en Stripe.
+        const reclamado = await PersistenceService.reclamarCobroSemanal(
+          solicitud.id, solicitud.proximo_cobro_semanal, new Date(Date.now() + SIETE_DIAS_MS)
+        );
+        if (!reclamado) {
+          console.log(`[Cobros Semanales OXXO] La solicitud ${solicitud.id} ya la tomó otra corrida en paralelo — se omite.`);
+          continue;
+        }
+
         if (!solicitud.stripe_customer_id) {
           throw new Error('La solicitud no tiene un customer_id de Stripe guardado todavía.');
         }
@@ -95,7 +113,6 @@ export class CobrosSemanalesService {
           numeroSemana
         );
 
-        await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + SIETE_DIAS_MS));
         console.log(`[Cobros Semanales OXXO] Voucher #${numeroSemana} generado y enviado para la solicitud ${solicitud.id}.`);
         procesadas++;
       } catch (error: any) {

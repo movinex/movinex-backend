@@ -8,7 +8,12 @@ export class WhatsappOtpService {
   private static ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
   private static PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
   private static TEMPLATE_NAME = process.env.WHATSAPP_OTP_TEMPLATE_NAME || 'movinex_otp';
-  private static COBRO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TEMPLATE_NAME || 'movinex_cobro_semanal';
+  // Reemplaza a `movinex_cobro_semanal` (2026-08-21): esa plantilla decía "Realiza tu
+  // transferencia SPEI o depósito en OXXO a la siguiente CLABE", texto que quedó
+  // desactualizado desde que OXXO se separó a su propio voucher (2026-08-12, ver
+  // `enviarLinkPagoSemanalOxxo`) — un cliente de OXXO nunca recibe este mensaje, así que
+  // mencionarlo acá solo confundía. Nueva plantilla, solo texto de SPEI.
+  private static COBRO_SPEI_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_SPEI_TEMPLATE_NAME || 'movinex_cobro_semanal_spei';
   private static COBRO_OXXO_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_OXXO_TEMPLATE_NAME || 'movinex_cobro_semanal_oxxo';
   private static COBRO_TARJETA_FALLIDA_TEMPLATE_NAME = process.env.WHATSAPP_COBRO_TARJETA_FALLIDA_TEMPLATE_NAME || 'movinex_cobro_tarjeta_fallida';
   private static PAGO_CONFIRMADO_TEMPLATE_NAME = process.env.WHATSAPP_PAGO_CONFIRMADO_TEMPLATE_NAME || 'movinex_pago_confirmado';
@@ -110,7 +115,7 @@ export class WhatsappOtpService {
    * mismo mensaje sirve de recordatorio todas las semanas. Los de OXXO usan
    * `enviarLinkPagoSemanalOxxo` en su lugar — OXXO no soporta una referencia fija
    * reutilizable (ver el comentario en `StripeService.crearPagoSemanalOxxo`). Usa la
-   * plantilla `WHATSAPP_COBRO_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
+   * plantilla `WHATSAPP_COBRO_SPEI_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
    */
   static async enviarRecordatorioPagoSemanal(
     celular: string,
@@ -132,7 +137,7 @@ export class WhatsappOtpService {
           to: this.formatearNumero(celular),
           type: 'template',
           template: {
-            name: this.COBRO_TEMPLATE_NAME,
+            name: this.COBRO_SPEI_TEMPLATE_NAME,
             language: { code: 'es_MX' },
             components: [
               {
