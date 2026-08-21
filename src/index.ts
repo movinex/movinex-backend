@@ -1348,6 +1348,9 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
       //   referencia fija reutilizable (confirmado en la documentación de Stripe), así
       //   que solo se guarda el customer_id para poder generarle un voucher nuevo cada
       //   semana (ver cobrosSemanalesService.ts → procesarPendientesOxxo).
+      // Mismo link para los tres métodos: es adonde sigue el flujo después de pagar.
+      const linkContinuar = `${ALLOWED_ORIGINS[0]}/verificacion?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
+
       if (customerId && paymentIntentId) {
         try {
           const { paymentMethodId, tipo, receiptUrl } = await StripeService.obtenerMetodoPagoDeIntent(paymentIntentId, usarProduccion);
@@ -1363,7 +1366,6 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
             try {
-              const linkContinuar = `${ALLOWED_ORIGINS[0]}/verificacion?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
               await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
@@ -1394,7 +1396,6 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // success_url) — sin este aviso, nadie le dice que ya puede volver a cargar
             // su domicilio. Mismo link que usa crear-orden-enganche para success_url.
             try {
-              const linkContinuar = `${ALLOWED_ORIGINS[0]}/verificacion?solicitud=${solicitud.id}&modelo=${encodeURIComponent(solicitud.modelo)}`;
               await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
@@ -1419,6 +1420,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // Igual que OXXO/SPEI arriba: el primer cobro real vence en 7 días (fin del
             // trial) — sin esto Cobranza no tenía ninguna fecha que mostrar para tarjeta.
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+            // Tarjeta también recibe la confirmación. La versión original no la mandaba
+            // acá porque Stripe redirige solo al cliente vía success_url, pero eso solo
+            // sirve si sigue frente a la pantalla: si cerró la pestaña o perdió señal al
+            // volver, se quedaba sin ningún aviso ni forma de retomar el flujo.
+            try {
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+            } catch (whatsappError: any) {
+              console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
+            }
+
             console.log(`[Stripe Webhook] Suscripción semanal ${subscriptionId} creada para la solicitud ${solicitud.id}.`);
           }
         } catch (subError: any) {
