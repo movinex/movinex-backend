@@ -25,12 +25,12 @@ export class EntregasService {
       try {
         const usarProduccion = solicitud.email?.trim().toLowerCase() !== 'desarrollo@movinex.mx';
         const resultado = await SkydropxService.consultarEstadoEntrega(
-          solicitud.tracking_number,
-          solicitud.skydropx_carrier,
+          solicitud.skydropx_shipment_id,
           usarProduccion
         );
 
         if (!resultado.entregado) {
+          console.log(`[Entregas] Solicitud ${solicitud.id}: Skydropx todavía la reporta como "${resultado.status || 'sin estado'}".`);
           sinCambios++;
           continue;
         }
