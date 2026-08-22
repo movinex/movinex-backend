@@ -13,16 +13,17 @@ export class SkydropxService {
 
   private static REMITENTE_DEFAULT = {
     name: 'NVX Technologies',
-    street1: 'Av. Paseo de la Reforma',
-    street_number: '222',
-    postal_code: '06600',
-    area_level1: 'Ciudad de Mexico',
-    area_level2: 'Cuauhtemoc',
-    area_level3: 'Juarez',
+    street1: 'Bosque de Arrayan',
+    street_number: '1',
+    apartment_number: '417',
+    postal_code: '52930',
+    area_level1: 'Mexico',
+    area_level2: 'Atizapan de Zaragoza',
+    area_level3: 'Bosque Esmeralda',
     country_code: 'MX',
     phone: '5215555028744',
-    email: 'contacto@movinex.mx',
-    reference: 'Oficina Movinex'
+    email: 'info@movinex.mx',
+    reference: 'Dentro de City Center'
   };
 
   // Clave SAT de producto/servicio para "Teléfonos móviles (Celular o Smartphone)",
