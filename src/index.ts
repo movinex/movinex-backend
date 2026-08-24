@@ -839,6 +839,33 @@ app.post('/api/solicitudes/:id/confirmar-terminos', async (req: Request, res: Re
       return res.status(400).json({ error: `Faltan completar: ${faltantes.join(', ')}.` });
     }
 
+    // Un CURP = un crédito activo. El CURP está garantizado presente acá arriba, así que
+    // este es el punto de enganche exacto para el bloqueo — antes de esto la solicitud
+    // todavía puede terminar en nada (lead abandonado) y no debe bloquear a nadie.
+    const creditoActivo = await PersistenceService.getCreditoActivoPorCurp(solicitud.curp);
+    if (creditoActivo) {
+      const solicitudDelCredito = await PersistenceService.getSolicitudById(creditoActivo.solicitud_id);
+      const progreso = solicitudDelCredito
+        ? `${solicitudDelCredito.semanas_pagadas ?? 0} de ${solicitudDelCredito.semanas} semanas`
+        : 'en curso';
+      const detalle = `Ya tiene un crédito activo (${progreso}).`;
+
+      await PersistenceService.updateEstatus(id, 'Rechazado');
+      await PersistenceService.registrarRechazo({
+        solicitudId: id,
+        curp: solicitud.curp,
+        motivo: 'curp_con_credito_activo',
+        detalle,
+        creditoId: creditoActivo.id
+      });
+
+      console.log(`[Créditos] Solicitud ${id} rechazada: el CURP ya tiene un crédito activo (${creditoActivo.solicitud_id}).`);
+      return res.status(409).json({
+        error: 'Este CURP ya tiene un crédito activo con nosotros. Cuando termines de pagarlo vas a poder pedir otro equipo.',
+        motivo: 'curp_con_credito_activo'
+      });
+    }
+
     const solicitudActualizada = await PersistenceService.confirmarTerminos(id);
     return res.status(200).json({ success: true, solicitud: solicitudActualizada });
   } catch (error: any) {
@@ -1082,6 +1109,22 @@ app.get('/api/admin/cartera', requireAdminAuth, async (req: Request, res: Respon
   } catch (error: any) {
     console.error('Error al obtener la cartera:', error.message);
     return res.status(500).json({ error: 'No se pudo obtener la cartera.' });
+  }
+});
+
+/**
+ * Historial de intentos bloqueados por CURP-ya-con-crédito-activo, para la vista de
+ * Rechazos de /sadmin. El join con la solicitud (cliente, celular) lo arma el frontend
+ * contra la lista de solicitudes que ya tiene cargada — igual que /api/admin/cartera
+ * deja el join de pagos para lib/cartera.ts.
+ */
+app.get('/api/admin/rechazos', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const rechazos = await PersistenceService.getRechazos();
+    return res.status(200).json({ rechazos });
+  } catch (error: any) {
+    console.error('Error al obtener los rechazos:', error.message);
+    return res.status(500).json({ error: 'No se pudo obtener el historial de rechazos.' });
   }
 });
 
@@ -1360,6 +1403,13 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           metodo: 'oxxo',
           stripeId: session.id
         });
+
+        // OXXO no tiene Subscription que cancelar (ver comentario más abajo), pero el
+        // CURP igual tiene que liberarse cuando termina de pagar por este método.
+        if (resultado.semanas_pagadas >= resultado.semanas) {
+          await PersistenceService.liquidarCredito(solicitudId);
+          console.log(`[Stripe Webhook] Plan completo por OXXO (${resultado.semanas_pagadas}/${resultado.semanas}) para la solicitud ${solicitudId} — crédito liquidado.`);
+        }
         return res.status(200).json({ received: true });
       }
 
@@ -1371,6 +1421,17 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
 
       await PersistenceService.marcarPagoConfirmado(solicitudId, paymentIntentId);
       console.log(`[Stripe Webhook] Pago confirmado para la solicitud ${solicitudId}.`);
+
+      // Nace el crédito real. Si el CURP viniera vacío acá sería un dato corrupto (ya se
+      // exige en confirmar-terminos), así que solo se intenta si está presente.
+      if (solicitud.curp) {
+        await PersistenceService.crearCredito({
+          solicitudId: solicitud.id,
+          curp: solicitud.curp,
+          montoSemanal: Number(solicitud.pago_semanal) || 0,
+          semanas: Number(solicitud.semanas) || 0
+        });
+      }
 
       // Arma el cobro semanal automático a partir de cómo se pagó el enganche.
       // - Tarjeta: Subscription clásica cobrando la tarjeta guardada.
@@ -1551,6 +1612,9 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         } catch (cancelError: any) {
           console.error(`[Stripe Webhook] No se pudo cancelar la Subscription de la solicitud ${solicitudId} tras completar el plan: ${cancelError.message}`);
         }
+
+        // Libera el CURP: ya terminó de pagar, puede pedir otro equipo.
+        await PersistenceService.liquidarCredito(solicitudId);
       } else {
         // Tarjeta: a diferencia de OXXO/SPEI (donde el cron ya programa la próxima fecha
         // al mandar el recordatorio/voucher), acá el invoice.paid es la única señal de

@@ -342,6 +342,11 @@ export class PersistenceService {
       .select();
 
     if (error) throw error;
+
+    // Si esta solicitud tenía un crédito activo, cancelarlo también libera el CURP —
+    // sin esto, cancelar una solicitud pagando dejaría su CURP bloqueado para siempre.
+    await this.cancelarCredito(id);
+
     return data[0];
   }
 
@@ -629,6 +634,141 @@ export class PersistenceService {
       console.error(`[Pagos] No se pudo registrar el pago ${pago.stripeId}:`, error.message);
       return false;
     }
+  }
+
+  // ── Créditos y rechazos: un CURP = un crédito activo ──────────────────────────────
+  //
+  // `creditos` es el crédito real (nace cuando se paga el enganche); `rechazos` es el
+  // historial de intentos bloqueados por CURP. La garantía de unicidad vive en la base
+  // (índice único parcial `creditos_curp_activo`, ver la migración) — estos métodos son
+  // la única forma en que el resto del backend toca esas tablas.
+
+  /**
+   * Consultado antes de dejar avanzar el 2do OTP (POST /:id/confirmar-terminos) para
+   * decidir si hay que bloquear la solicitud. Normalizado igual que la comparación
+   * contra RENAPO (trim + mayúsculas) porque el CURP se guarda tal cual lo tipeó el
+   * cliente, sin validar el formato real.
+   */
+  static async getCreditoActivoPorCurp(curp: string) {
+    const { data, error } = await supabase
+      .from('creditos')
+      .select('*')
+      .eq('curp', curp.trim().toUpperCase())
+      .eq('estado', 'activo')
+      .maybeSingle();
+
+    if (error) throw error;
+    return data;
+  }
+
+  /**
+   * Alta del crédito: una fila por enganche pagado. `upsert` + `ignoreDuplicates` sobre
+   * `solicitud_id` (igual que registrarPago) para que un reintento del webhook de Stripe
+   * no falle — nunca lanza: si esto falla, el pago ya se confirmó y no tiene sentido
+   * revertirlo por un problema de contabilidad del crédito. Si la carrera es contra el
+   * índice único de CURP activo (dos solicitudes del mismo CURP pagando a la vez), cae
+   * en el mismo catch y queda logueado para revisar a mano — no debería pasar nunca
+   * porque el bloqueo del 2do OTP ya lo previene salvo una carrera real.
+   */
+  static async crearCredito(credito: {
+    solicitudId: string;
+    curp: string;
+    montoSemanal: number;
+    semanas: number;
+    // Solo usado por el backfill, que reconstruye créditos ya terminados/cancelados —
+    // el webhook en tiempo real siempre crea en 'activo' (default de la columna).
+    estado?: 'activo' | 'liquidado' | 'cancelado';
+    liquidadoAt?: Date;
+    canceladoAt?: Date;
+  }): Promise<boolean> {
+    try {
+      const { data, error } = await supabase
+        .from('creditos')
+        .upsert(
+          {
+            solicitud_id: credito.solicitudId,
+            curp: credito.curp.trim().toUpperCase(),
+            monto_semanal: credito.montoSemanal,
+            semanas: credito.semanas,
+            ...(credito.estado ? { estado: credito.estado } : {}),
+            ...(credito.liquidadoAt ? { liquidado_at: credito.liquidadoAt.toISOString() } : {}),
+            ...(credito.canceladoAt ? { cancelado_at: credito.canceladoAt.toISOString() } : {})
+          },
+          { onConflict: 'solicitud_id', ignoreDuplicates: true }
+        )
+        .select();
+
+      if (error) throw error;
+      return (data || []).length > 0;
+    } catch (error: any) {
+      console.error(`[Créditos] No se pudo crear el crédito de la solicitud ${credito.solicitudId}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Libera el CURP: pasa el crédito a liquidado cuando se completan todas las semanas.
+   * El filtro `estado = 'activo'` lo hace idempotente ante reintentos del webhook — si
+   * ya está liquidado, no vuelve a pisar `liquidado_at`.
+   */
+  static async liquidarCredito(solicitudId: string) {
+    const { error } = await supabase
+      .from('creditos')
+      .update({ estado: 'liquidado', liquidado_at: new Date().toISOString() })
+      .eq('solicitud_id', solicitudId)
+      .eq('estado', 'activo');
+
+    if (error) throw error;
+  }
+
+  /** Contraparte de liquidarCredito para el botón "Cancelar solicitud" del admin. */
+  static async cancelarCredito(solicitudId: string) {
+    const { error } = await supabase
+      .from('creditos')
+      .update({ estado: 'cancelado', cancelado_at: new Date().toISOString() })
+      .eq('solicitud_id', solicitudId)
+      .eq('estado', 'activo');
+
+    if (error) throw error;
+  }
+
+  /** Un intento bloqueado por CURP-ya-con-crédito-activo, para la vista de Rechazos. */
+  static async registrarRechazo(rechazo: {
+    solicitudId: string;
+    curp: string;
+    motivo: string;
+    detalle?: string;
+    creditoId?: string;
+  }) {
+    const { error } = await supabase
+      .from('rechazos')
+      .insert({
+        solicitud_id: rechazo.solicitudId,
+        curp: rechazo.curp.trim().toUpperCase(),
+        motivo: rechazo.motivo,
+        detalle: rechazo.detalle ?? null,
+        credito_id: rechazo.creditoId ?? null
+      });
+
+    if (error) throw error;
+  }
+
+  /**
+   * Todo el historial de rechazos, más nuevo primero. El join con la solicitud RECHAZADA
+   * (para mostrar cliente/celular) lo arma el frontend contra la lista de solicitudes que
+   * ya tiene cargada, igual que hace lib/cartera.ts con los pagos — pero el crédito que
+   * CAUSÓ el bloqueo no está en ninguna lista que el frontend ya tenga, así que acá se
+   * embebe su `solicitud_id` vía el FK `credito_id → creditos.id` (Supabase lo infiere
+   * solo del esquema), para poder linkear directo a su estado de cuenta.
+   */
+  static async getRechazos() {
+    const { data, error } = await supabase
+      .from('rechazos')
+      .select('*, credito:creditos(solicitud_id)')
+      .order('creado_at', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
   }
 
   /**
