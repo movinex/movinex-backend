@@ -1920,12 +1920,18 @@ cron.schedule('0 4 * * *', () => {
     });
 }, { timezone: 'America/Mexico_City' });
 
-// Cron diario (11am hora de Ciudad de México, después del de cobros semanales) que
-// revisa el tracking de Skydropx de cada solicitud "Enviado" y, si ya figura como
+// Revisa el tracking de Skydropx de cada solicitud "Enviado" y, si ya figura como
 // entregada, pasa el estatus a "Entregado" y avisa al cliente por WhatsApp — ver
 // entregasService.ts. Polling en vez de webhook: no se confirmó si Skydropx Pro
 // soporta webhooks de entrega para esta cuenta (ver conversación 2026-08-14).
-cron.schedule('0 11 * * *', () => {
+//
+// 4 veces al día (9, 13, 17 y 21 hora de CDMX) en vez de una sola a las 11: con una
+// corrida diaria, un paquete entregado a las 11:05 recién se marcaba 24 h después y el
+// cliente recibía el aviso al otro día. Con esta cadencia el peor caso baja a 4 h, y
+// cubre la franja en que los paqueteros entregan de verdad. Cuesta poco: solo consulta
+// los envíos que siguen en "Enviado" (hoy son 3) y no escribe nada si no cambió el
+// estado.
+cron.schedule('0 9,13,17,21 * * *', () => {
   console.log('[Cron] Revisando entregas pendientes de confirmar...');
   EntregasService.procesarPendientes().catch((error) => {
     console.error('[Cron] Error al procesar entregas:', error.message);

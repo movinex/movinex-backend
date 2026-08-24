@@ -691,14 +691,15 @@ export class PersistenceService {
   }
 
   // Solicitudes ya marcadas "Enviado" con guía de Skydropx generada — candidatas para
-  // que el cron de verificación de entregas (entregasService.ts) consulte su tracking.
+  // que el cron de verificación de entregas (entregasService.ts) consulte su estado.
+  // Se exige `skydropx_shipment_id` (no el carrier) porque la consulta real va por id de
+  // envío: ver el comentario en SkydropxService.consultarEstadoEntrega.
   static async getSolicitudesEnviadasConTracking() {
     const { data, error } = await supabase
       .from('solicitudes')
       .select('*')
       .eq('estatus', 'Enviado')
-      .not('tracking_number', 'is', null)
-      .not('skydropx_carrier', 'is', null);
+      .not('skydropx_shipment_id', 'is', null);
 
     if (error) throw error;
     return data;

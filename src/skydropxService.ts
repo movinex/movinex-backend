@@ -13,16 +13,17 @@ export class SkydropxService {
 
   private static REMITENTE_DEFAULT = {
     name: 'NVX Technologies',
-    street1: 'Av. Paseo de la Reforma',
-    street_number: '222',
-    postal_code: '06600',
-    area_level1: 'Ciudad de Mexico',
-    area_level2: 'Cuauhtemoc',
-    area_level3: 'Juarez',
+    street1: 'Bosque de Arrayan',
+    street_number: '1',
+    apartment_number: '417',
+    postal_code: '52930',
+    area_level1: 'Mexico',
+    area_level2: 'Atizapan de Zaragoza',
+    area_level3: 'Bosque Esmeralda',
     country_code: 'MX',
     phone: '5215555028744',
-    email: 'contacto@movinex.mx',
-    reference: 'Oficina Movinex'
+    email: 'info@movinex.mx',
+    reference: 'Dentro de City Center'
   };
 
   // Clave SAT de producto/servicio para "Teléfonos móviles (Celular o Smartphone)",
@@ -242,34 +243,46 @@ export class SkydropxService {
     }
   }
 
-  // Estados de entrega que devuelve Skydropx Pro. No confirmado 100% contra la API
-  // real todavía (la documentación pública no deja del todo claro el shape exacto) —
-  // ver consultarEstadoEntrega.
+  // Estados de entrega de Skydropx Pro. Confirmado contra la API real 2026-08-22: el
+  // valor que devuelve es `"delivered"` en minúsculas (display name "Entregado").
   static readonly ESTADOS_ENTREGADO = ['ENTREGADO', 'DELIVERED'];
 
   /**
    * Consulta el estado actual de un envío ya generado — usado por el cron de
-   * verificación de entregas (ver entregasService.ts) en vez de depender de un
-   * webhook de Skydropx (no confirmado si aplica a esta cuenta "Pro", ver
-   * conversación 2026-08-14). Requiere el carrier guardado en crearEnvio.
+   * verificación de entregas (ver entregasService.ts) en vez de depender de un webhook
+   * de Skydropx (no confirmado si aplica a esta cuenta "Pro", ver conversación
+   * 2026-08-14).
+   *
+   * Va por **id de envío**, no por tracking number. La versión anterior pegaba a
+   * `/api/v1/shipments/tracking/:tracking/:carrier`, un endpoint que simplemente **no
+   * existe**: devolvía el HTML de la página 404 del sitio de Skydropx, que axios trataba
+   * como error. Resultado: el cron fallaba todos los días para todos los envíos y ninguna
+   * solicitud pasaba jamás a "Entregado" sola (encontrado 2026-08-22 con el envío de
+   * Martín Francisco, que Skydropx ya daba por entregado hacía días). Esos 404 eran
+   * también el ruido que llenaba los logs del backend.
+   *
+   * El estado real vive en el paquete, no en el envío: `included[]` trae los `package` y
+   * ahí está `tracking_status`. `workflow_status` del shipment es otra cosa (dice si la
+   * guía se generó bien) y queda en "success" para siempre.
    */
   static async consultarEstadoEntrega(
-    trackingNumber: string,
-    carrier: string,
+    shipmentId: string,
     usarProduccion: boolean
   ): Promise<{ status: string; entregado: boolean; rawData?: any }> {
     const baseUrl = usarProduccion ? this.PROD_BASE_URL : this.BASE_URL;
     const auth = await this.authHeaders(usarProduccion);
 
-    const response = await axios.get(
-      `${baseUrl}/api/v1/shipments/tracking/${encodeURIComponent(trackingNumber)}/${encodeURIComponent(carrier)}`,
-      auth
-    );
+    const response = await axios.get(`${baseUrl}/api/v1/shipments/${encodeURIComponent(shipmentId)}`, auth);
 
-    const status: string = response.data?.status || response.data?.data?.attributes?.status || '';
+    const paquetes = (response.data?.included || []).filter((i: any) => i?.type === 'package');
+    // Un envío nuestro siempre lleva un solo paquete (ver crearEnvio), pero si alguna vez
+    // fueran varios, la entrega recién cuenta cuando llegaron todos.
+    const estados: string[] = paquetes.map((p: any) => String(p?.attributes?.tracking_status || ''));
+    const status = estados[0] || '';
+
     return {
       status,
-      entregado: this.ESTADOS_ENTREGADO.includes(status.toUpperCase()),
+      entregado: estados.length > 0 && estados.every((e) => this.ESTADOS_ENTREGADO.includes(e.toUpperCase())),
       rawData: response.data
     };
   }
