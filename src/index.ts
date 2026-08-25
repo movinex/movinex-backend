@@ -647,7 +647,7 @@ app.post('/api/solicitudes/:id/crear-sesion-verificamex', async (req: Request, r
 // POST: Enviar código OTP por WhatsApp (paso previo al pago del enganche)
 app.post('/api/otp/enviar', async (req: Request, res: Response) => {
   try {
-    const { celular } = req.body;
+    const { celular, solicitudId } = req.body;
     const digitos = celular ? String(celular).replace(/\D/g, '') : '';
     // Solo clientes mexicanos: 10 dígitos, sin código de país. La única excepción es
     // el número de pruebas del equipo (ver WhatsappOtpService.formatearNumero), que
@@ -656,7 +656,7 @@ app.post('/api/otp/enviar', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Se requiere un celular mexicano de 10 dígitos.' });
     }
 
-    const { mock } = await WhatsappOtpService.enviarCodigo(celular);
+    const { mock } = await WhatsappOtpService.enviarCodigo(celular, solicitudId || undefined);
     return res.status(200).json({ success: true, mock });
   } catch (error: any) {
     console.error('Error al enviar OTP:', error);

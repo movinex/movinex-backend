@@ -64,7 +64,7 @@ export class WhatsappOtpService {
    * dada de alta y aprobada en el WhatsApp Business Manager. Mientras eso no esté
    * listo, o en desarrollo local, cae al modo mock (loguea el código por consola).
    */
-  static async enviarCodigo(celular: string): Promise<{ mock: boolean }> {
+  static async enviarCodigo(celular: string, solicitudId?: string): Promise<{ mock: boolean }> {
     const codigo = this.generarCodigo();
     const expiraEn = new Date(Date.now() + OTP_TTL_MINUTOS * 60 * 1000);
     const tipo = 'OTP verificación';
@@ -73,9 +73,13 @@ export class WhatsappOtpService {
 
     if (this.MOCK) {
       console.log(`[WhatsApp OTP MOCK] Código para ${celular}: ${codigo} (válido ${OTP_TTL_MINUTOS} min)`);
-      // Sin solicitudId: todavía no existe la solicitud a esta altura del flujo —
-      // POST /api/solicitudes[/iniciar] la adopta apenas se crea (ver vincularMensajesPendientes).
-      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: true, mock: true });
+      // El 1er OTP (paso "celular") se manda antes de que la solicitud exista —
+      // solicitudId llega undefined, y POST /api/solicitudes[/iniciar] lo adopta apenas
+      // se crea (ver vincularMensajesPendientes). El 2do OTP (paso "codigo2",
+      // reconfirmación antes de pagar) se manda con la solicitud ya creada, así que acá
+      // sí llega solicitudId — sin esto, ese mensaje quedaba huérfano para siempre
+      // (vincularMensajesPendientes solo corre una vez, al crear la solicitud).
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -103,11 +107,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp OTP] Código enviado a ${celular}.`);
-      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: true, mock: false });
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp OTP] Error al enviar el código:', error.response?.data || error.message);
-      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: false, mock: false, detalle: error.message });
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el código de verificación por WhatsApp.');
     }
   }
