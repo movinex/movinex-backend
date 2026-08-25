@@ -304,6 +304,66 @@ app.get('/api/celulares', async (req: Request, res: Response) => {
   }
 });
 
+// Una celda de CSV: se entrecomilla solo si hace falta (coma, comilla o salto de línea),
+// mismo criterio que toCSV en el frontend (lib/csv.ts) — así el archivo abre bien tanto
+// en Excel como en el validador de feeds de Meta.
+function celdaCSV(valor: string | number | null | undefined): string {
+  const texto = valor == null ? '' : String(valor);
+  return /[",\n]/.test(texto) ? `"${texto.replace(/"/g, '""')}"` : texto;
+}
+
+/**
+ * Feed de catálogo para Meta Commerce Manager (Orígenes de datos → Archivo de datos),
+ * reemplaza la carga manual producto por producto. Spec de campos:
+ * https://www.facebook.com/business/help/120325381656392 — se arma en vivo desde
+ * `celulares`, no hay ninguna tabla ni caché nueva. Público y sin auth a propósito: Meta
+ * tiene que poder pedirlo solo, con su propio refresco programado (recomendado: diario).
+ */
+app.get('/feed/meta-catalogo.csv', async (req: Request, res: Response) => {
+  try {
+    const celulares = await PersistenceService.getCelulares();
+
+    const columnas = ['id', 'title', 'description', 'availability', 'condition', 'price', 'sale_price', 'link', 'image_link', 'brand'];
+    const filas = celulares.map((c: any) => {
+      // Las specs se cargan a mano en el catálogo y algunas traen tabs/espacios de más
+      // pegados del Excel de origen — se normalizan acá, no se tocan en la base.
+      const descripcion = [c.specs_ram_almacenamiento, c.specs_pantalla, c.specs_camara_trasera, c.specs_bateria]
+        .map((s) => (s ? String(s).replace(/\s+/g, ' ').trim() : s))
+        .filter(Boolean)
+        .join(' · ') || `${c.marca || ''} ${c.modelo}`.trim();
+
+      return [
+        c.id,
+        `${c.marca ? c.marca + ' ' : ''}${c.modelo}`,
+        descripcion,
+        // Sin contador de inventario por modelo hoy: se pide bajo demanda, así que
+        // siempre está disponible para financiar. Si eso cambia, acá es donde se lee
+        // el stock real.
+        'in stock',
+        'new',
+        `${Number(c.precio_base).toFixed(2)} MXN`,
+        c.precio_descuento ? `${Number(c.precio_descuento).toFixed(2)} MXN` : '',
+        // El id de celulares es texto libre cargado a mano (no un UUID) — algunos
+        // llevan espacios ("Motorola E15"), así que hay que codificarlo para la URL.
+        `${ALLOWED_ORIGINS[0]}/cotizar/${encodeURIComponent(c.id)}`,
+        c.imagen_url || c.imagen || '',
+        c.marca || ''
+      ].map(celdaCSV).join(',');
+    });
+
+    const csv = [columnas.join(','), ...filas].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    // Nombre fijo: si Meta llega a cachear por nombre de archivo, que no cambie entre
+    // corridas — el contenido sí se refresca en cada pedido, no el nombre.
+    res.setHeader('Content-Disposition', 'inline; filename="meta-catalogo.csv"');
+    return res.status(200).send(csv);
+  } catch (error: any) {
+    console.error('Error al generar el feed de Meta:', error);
+    return res.status(500).send('No se pudo generar el feed.');
+  }
+});
+
 /**
  * @swagger
  * /api/solicitudes:
