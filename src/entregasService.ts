@@ -36,7 +36,7 @@ export class EntregasService {
         }
 
         await PersistenceService.marcarEntregado(solicitud.id);
-        await WhatsappOtpService.enviarPedidoEntregado(solicitud.celular, solicitud.cliente, solicitud.modelo);
+        await WhatsappOtpService.enviarPedidoEntregado(solicitud.id, solicitud.celular, solicitud.cliente, solicitud.modelo);
         console.log(`[Entregas] Solicitud ${solicitud.id} (${solicitud.modelo}) marcada como Entregado.`);
         entregadas++;
       } catch (error: any) {

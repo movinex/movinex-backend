@@ -42,6 +42,7 @@ export class CobrosSemanalesService {
         }
 
         await WhatsappOtpService.enviarRecordatorioPagoSemanal(
+          solicitud.id,
           solicitud.celular,
           solicitud.cliente,
           solicitud.stripe_clabe_referencia,
@@ -106,6 +107,7 @@ export class CobrosSemanalesService {
         );
 
         await WhatsappOtpService.enviarLinkPagoSemanalOxxo(
+          solicitud.id,
           solicitud.celular,
           solicitud.cliente,
           url,

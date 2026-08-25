@@ -13,7 +13,7 @@ API Node.js + Express + TypeScript desplegada en Railway. Repo hermano: `../movi
   - **OXXO/SPEI** (decisión de negocio, reunión 07/08 — reemplaza el diseño anterior de "link nuevo cada semana" del 06/08): `crearReferenciaPagoPersistente` usa `customers.createFundingInstructions` para darle al Customer una **CLABE fija y reutilizable** (no ligada a un pago puntual — llamarlo de nuevo devuelve la misma CLABE). El cliente deposita ahí por SPEI o en efectivo en OXXO (depósito referenciado, un servicio bancario normal en México, no algo específico de Stripe). `crearSuscripcionConSaldo` arma una Subscription con `collection_method: 'send_invoice'` (no hay tarjeta que cobrar) — Stripe aplica el saldo depositado a cada factura semanal sola, sin que nadie tenga que hacer nada, y dispara `invoice.paid` cuando alcanza.
 - `cobrosSemanalesService.ts` — **recordatorio semanal para OXXO/SPEI**: no genera nada nuevo en Stripe, solo manda por WhatsApp (`WhatsappOtpService.enviarRecordatorioPagoSemanal`) un recordatorio con la **misma CLABE de siempre** a las solicitudes que lo tengan pendiente (`PersistenceService.getSolicitudesConCobroSemanalPendiente`). El envío es optimista: `proximo_cobro_semanal` avanza 7 días al mandar el recordatorio, sin esperar a que el cliente deposite — `semanas_pagadas` (el contador real de progreso) solo avanza cuando el webhook `invoice.paid` confirma que el saldo alcanzó para cubrir la factura de esa semana. Lo dispara un cron diario en `index.ts` (`cron.schedule`, 9am hora CDMX) o el endpoint `POST /api/admin/cobros-semanales/procesar` para probarlo a mano.
 - `skydropxService.ts` — `crearEnvio` sigue el flujo real de 3 llamadas (`/quotations` → elegir la tarifa más barata → `/labels`) y devuelve `{ trackingNumber, labelUrl }`. **Go-live (2026-08-10)**: usa producción (`SKYDROPX_PROD_*`) por default; solo `desarrollo@movinex.mx` cae a sandbox. Si la llamada falla, cae a un tracking simulado (`simulado: true`) en vez de propagar el error. `POST /:id/domicilio` ya no espera este flujo completo para responder — guarda el domicilio, responde, y genera la guía en segundo plano.
-- `whatsappOtpService.ts` — OTP de 6 dígitos por WhatsApp (Meta Cloud API) antes de pagar el enganche. Guarda el código en la tabla `otp_codigos` de Supabase (expira a los 5 min, máx. 5 intentos). **Mockeado por default** (`WHATSAPP_OTP_MOCK=true` o si faltan `WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`): loguea el código por consola en vez de mandarlo — Meta requiere una plantilla de tipo "Authentication" aprobada antes de poder mandar mensajes reales. También trae `enviarRecordatorioPagoSemanal` (mismo mock/config, plantilla separada tipo "Utility": `WHATSAPP_COBRO_SPEI_TEMPLATE_NAME`, default `movinex_cobro_semanal_spei` — solo para clientes que pagaron el enganche por SPEI) para el cobro semanal manual de arriba — un mismo mensaje sirve tanto para avisar la CLABE la primera vez (al confirmarse el enganche) como para los recordatorios semanales siguientes, siempre con la misma CLABE como texto plano en el body (no como botón de URL, para no depender de un dominio fijo). Reemplaza a la plantilla vieja `movinex_cobro_semanal` (mencionaba "SPEI o depósito en OXXO", desactualizada desde que OXXO se separó a su propio voucher — ver `enviarLinkPagoSemanalOxxo`).
+- `whatsappOtpService.ts` — OTP de 6 dígitos por WhatsApp (Meta Cloud API) antes de pagar el enganche. Guarda el código en la tabla `otp_codigos` de Supabase (expira a los 5 min, máx. 5 intentos). **Mockeado por default** (`WHATSAPP_OTP_MOCK=true` o si faltan `WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`): loguea el código por consola en vez de mandarlo — Meta requiere una plantilla de tipo "Authentication" aprobada antes de poder mandar mensajes reales. También trae `enviarRecordatorioPagoSemanal` (mismo mock/config, plantilla separada tipo "Utility": `WHATSAPP_COBRO_SPEI_TEMPLATE_NAME`, default `movinex_cobro_semanal_spei` — solo para clientes que pagaron el enganche por SPEI) para el cobro semanal manual de arriba — un mismo mensaje sirve tanto para avisar la CLABE la primera vez (al confirmarse el enganche) como para los recordatorios semanales siguientes, siempre con la misma CLABE como texto plano en el body (no como botón de URL, para no depender de un dominio fijo). Reemplaza a la plantilla vieja `movinex_cobro_semanal` (mencionaba "SPEI o depósito en OXXO", desactualizada desde que OXXO se separó a su propio voucher — ver `enviarLinkPagoSemanalOxxo`). **2026-08-25**: todos los `enviarXxx` que ocurren después de que existe la solicitud ahora piden `solicitudId` como primer parámetro (el único que sigue sin él es `enviarCodigo`, el OTP de teléfono, que se manda antes de que la solicitud exista) — cada envío (éxito, mock o fallo) deja una fila en `mensajes_whatsapp` vía `PersistenceService.registrarMensajeWhatsapp`, que nunca lanza (igual que `registrarPago`), para no tumbar el envío real si el log falla. Alimenta `GET /api/admin/solicitudes/:id/mensajes`.
 - `security.ts` — HMAC/RSA para webhooks de Conekta + firma JWT para comandos MDM.
 - `superadminService.ts` — login de superadmin contra tabla `superadmins` (bcrypt).
 
@@ -30,6 +30,8 @@ API Node.js + Express + TypeScript desplegada en Railway. Repo hermano: `../movi
 - `POST /api/admin/cobros-semanales/procesar` — dispara a mano el envío de los recordatorios de pago semanal pendientes (mismo trabajo que corre solo por cron todos los días), para probar `cobrosSemanalesService.ts` sin esperar al horario.
 - `POST /api/webhooks/verificacion-cliente`, `POST /api/mdm/command`.
 - `GET /playground` — UI standalone para simular el webhook `order.paid` de Conekta sin firma (quedó desactualizada tras el pivote a Stripe, solo sirve de referencia).
+- `PATCH /api/solicitudes/:id` (admin) también acepta `celular` (2026-08-25) — corrige el número al que le llegan las alertas de una solicitud desde el detalle en /sadmin. Valida 10 dígitos igual que `POST /api/otp/enviar`; no reabre el OTP ni revalida identidad, solo cambia el destino de los WhatsApp futuros.
+- `GET /api/admin/solicitudes/:id/mensajes` (2026-08-25) — historial de WhatsApp mandados a una solicitud (tabla `mensajes_whatsapp`, ver más abajo), para el detalle en /sadmin.
 
 ## Seguridad de los webhooks
 
@@ -46,6 +48,56 @@ API Node.js + Express + TypeScript desplegada en Railway. Repo hermano: `../movi
 Backend: `PORT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `VERIFICAMEX_API_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` (sin usar en código — Checkout es 100% redirect server-driven, queda guardada solo por si se necesita Stripe.js más adelante), `STRIPE_WEBHOOK_SECRET` (del endpoint dado de alta en Developers > Webhooks del dashboard de Stripe, o de `stripe listen` en local), `CONEKTA_API_KEY`, `CONEKTA_PUBLIC_KEY` (inactivas, ver arriba), `SKYDROPX_API_KEY`, `SKYDROPX_API_SECRET` (sin usar en código todavía — Skydropx usa bearer simple, no OAuth2), `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_OTP_TEMPLATE_NAME`, `WHATSAPP_OTP_MOCK` (opcional), `WHATSAPP_COBRO_SPEI_TEMPLATE_NAME` (plantilla del recordatorio de cobro semanal por SPEI, default `movinex_cobro_semanal_spei`), `FRONTEND_URL` (default `https://www.movinex.mx`, success/cancel URL de los links de pago semanal — el cron no tiene un request del que sacar el header `Origin`), `MDM_JWT_SECRET` (sin fallback en código — si falta, el server no arranca).
 
 Frontend (`movinex-frontend/.env`): solo `VITE_BACKEND_URL` — no necesita ninguna llave de Stripe porque el backend devuelve la URL de Checkout ya armada.
+
+## Bug encontrado 2026-08-25: mensajes de cobro duplicados en cada restart del backend
+
+Reportado como "cada vez que se reinicia el back se están mandando los mensajes de cobro". La causa: el handler de `invoice.payment_failed` (aviso de tarjeta rechazada + link de reintento) era el **único** de los cuatro eventos de Stripe que no dedupeaba contra reintentos del webhook — `invoice.paid` sí lo hace desde antes (`ultima_invoice_pagada`, ver arriba), y `reclamarCobroSemanal` ya había tenido exactamente esta misma clase de bug en vivo el 2026-08-21 (comentario en `persistenceService.ts`). Stripe garantiza entrega "al menos una vez" de sus webhooks: si el backend no llega a responder 200 antes de que Railway lo reinicie (deploy, crash), Stripe reintenta la entrega más tarde — y cuando el proceso nuevo la recibe, sin dedup volvía a mandar el WhatsApp de tarjeta fallida Y a generar un link de reintento nuevo en Stripe, no solo a duplicar una fila de auditoría. De ahí la correlación con los restarts: no es que reiniciar dispare nada por sí solo (los cron de cobro solo corren por horario, `cron.schedule`, nunca al arrancar el proceso — se confirmó revisando `index.ts`), sino que un restart es el momento típico en que una entrega de webhook interrumpida vuelve a llegar.
+
+**Fix**: `PersistenceService.registrarFalloInvoiceSiNuevo` (nueva, junto a `marcarCobroSemanalFallido`) dedupea por `invoice.id + attempt_count` — no por `invoice.id` solo, porque a diferencia de `invoice.paid` (una factura se paga una sola vez) una misma invoice sí puede fallar de verdad varias veces seguidas (Smart Retries), y cada intento real todavía debe avisar. El handler de `invoice.payment_failed` en `index.ts` corta ahí, antes de marcar `cobro_semanal_fallido` o mandar cualquier WhatsApp, igual que `invoice.paid` corta en `resultado.yaProcesada`.
+
+## Migración pendiente 2026-08-25 (mensajes de WhatsApp + fix de arriba)
+
+Correr en el SQL editor de Supabase antes de que esto funcione en producción:
+
+```sql
+alter table solicitudes add column if not exists ultima_invoice_fallida text;
+
+create table if not exists mensajes_whatsapp (
+  id uuid primary key default gen_random_uuid(),
+  solicitud_id uuid not null references solicitudes(id),
+  celular text not null,
+  tipo text not null,
+  exito boolean not null,
+  mock boolean not null default false,
+  detalle text,
+  creado_en timestamptz not null default now()
+);
+create index if not exists idx_mensajes_whatsapp_solicitud on mensajes_whatsapp(solicitud_id);
+```
+
+**2026-08-26**: dos cosas que se quedaron afuera de la migración original.
+
+1. RLS — `pagos`/`creditos`/`rechazos` ya lo tienen (activado, sin políticas: la service-role key lo saltea por diseño, así queda cerrada por default en vez de depender de que la anon key nunca se filtre); `mensajes_whatsapp` guarda celulares y se quedó sin esto por error.
+2. Columna extra para que el backfill de abajo (`scripts/backfillMensajesWhatsapp.ts`) sea idempotente, mismo criterio que `pagos.stripe_id` — `fuente_id` queda `null` en los envíos en vivo (no aplica el índice, Postgres permite múltiples `null`) y solo la usa el backfill:
+
+```sql
+alter table mensajes_whatsapp enable row level security;
+alter table mensajes_whatsapp add column if not exists fuente_id text;
+create unique index if not exists idx_mensajes_whatsapp_fuente_id on mensajes_whatsapp(fuente_id);
+```
+
+**Corrección 2026-08-26**: el índice de arriba había quedado parcial (`where fuente_id is not null`) — un `unique` simple ya permite múltiples `NULL` sin chocar (NULL nunca es igual a otro NULL en Postgres), así que el `where` sobraba, y encima rompía el `ON CONFLICT (fuente_id)` que usa el backfill (Postgres no lo matchea contra un índice parcial salvo que la cláusula repita la misma condición, cosa que el cliente de Supabase no arma). Si ya corriste la versión de arriba con el `where`, correr esto encima:
+
+```sql
+drop index if exists idx_mensajes_whatsapp_fuente_id;
+create unique index idx_mensajes_whatsapp_fuente_id on mensajes_whatsapp(fuente_id);
+```
+
+**2026-08-26, segunda vuelta**: a pedido explícito, el OTP de verificación de teléfono (`WhatsappOtpService.enviarCodigo`) también se registra ahora — es el único mensaje que se manda ANTES de que exista la solicitud, así que `solicitud_id` tiene que poder quedar `null` un rato. `PersistenceService.vincularMensajesPendientes` lo adopta apenas se crea la solicitud con ese mismo celular (`POST /api/solicitudes` y `POST /api/solicitudes/iniciar`, los dos caminos que crean una fila nueva después del OTP). Falta soltar el `not null` que traía la columna:
+
+```sql
+alter table mensajes_whatsapp alter column solicitud_id drop not null;
+```
 
 ## Pendientes conocidos (reunión jul 2026)
 

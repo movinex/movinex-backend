@@ -409,6 +409,10 @@ app.post('/api/solicitudes', async (req: Request, res: Response) => {
       checkout_url: checkoutUrl
     });
 
+    // Adopta el mensaje de OTP (mandado antes de que esta solicitud existiera) — ver
+    // vincularMensajesPendientes.
+    await PersistenceService.vincularMensajesPendientes(celular, solicitud.id);
+
     return res.status(201).json({
       success: true,
       message: kycResult.valido 
@@ -444,6 +448,10 @@ app.post('/api/solicitudes/iniciar', async (req: Request, res: Response) => {
       pago_semanal,
       costo_envio: costoEnvio
     });
+
+    // Adopta el mensaje de OTP (mandado antes de que esta solicitud existiera) — ver
+    // vincularMensajesPendientes.
+    await PersistenceService.vincularMensajesPendientes(celular, solicitud.id);
 
     console.log(`[Backend] Solicitud ${solicitud.id} iniciada (OTP verificado) para ${celular}, modelo ${modelo}.`);
     return res.status(201).json({ success: true, solicitud });
@@ -560,7 +568,7 @@ async function aprobarYActivarEnvio(solicitud: any, verificamexResult?: number |
   }
 
   try {
-    await WhatsappOtpService.enviarVerificacionAprobada(solicitud.celular, solicitud.cliente, solicitud.modelo);
+    await WhatsappOtpService.enviarVerificacionAprobada(solicitud.id, solicitud.celular, solicitud.cliente, solicitud.modelo);
   } catch (whatsappError: any) {
     console.error(`[Verificación] No se pudo avisar la aprobación por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
   }
@@ -902,13 +910,23 @@ app.post('/api/solicitudes/:id/confirmar-terminos', async (req: Request, res: Re
 app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { estatus, imei } = req.body;
+    const { estatus, imei, celular } = req.body;
 
     if (imei !== undefined) {
       if (!String(imei).trim()) {
         return res.status(400).json({ error: 'El IMEI no puede estar vacío.' });
       }
       await PersistenceService.guardarImei(id, String(imei).trim());
+    }
+
+    if (celular !== undefined) {
+      // Mismo criterio que POST /api/otp/enviar: celular mexicano de 10 dígitos, sin
+      // código de país (así lo espera WhatsappOtpService.formatearNumero).
+      const digitos = String(celular).replace(/\D/g, '');
+      if (digitos.length !== 10) {
+        return res.status(400).json({ error: 'Se requiere un celular mexicano de 10 dígitos.' });
+      }
+      await PersistenceService.guardarCelular(id, digitos);
     }
 
     if (estatus === undefined) {
@@ -945,7 +963,7 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
 
     if (estatus === 'Enviado') {
       try {
-        await WhatsappOtpService.enviarPedidoEnviado(solicitudActualizada.celular, solicitudActualizada.cliente, solicitudActualizada.modelo);
+        await WhatsappOtpService.enviarPedidoEnviado(solicitudActualizada.id, solicitudActualizada.celular, solicitudActualizada.cliente, solicitudActualizada.modelo);
       } catch (whatsappError: any) {
         console.error(`[Estatus] No se pudo avisar por WhatsApp que la solicitud ${id} fue enviada: ${whatsappError.message}`);
       }
@@ -955,6 +973,21 @@ app.patch('/api/solicitudes/:id', requireAdminAuth, async (req: Request, res: Re
   } catch (error: any) {
     console.error('Error actualizando estatus:', error);
     return res.status(500).json({ error: error.message || 'Error al actualizar estatus.' });
+  }
+});
+
+// GET: historial de WhatsApp mandados a una solicitud, para el detalle en /sadmin.
+// Meta no expone ningún endpoint de consulta de mensajes ya enviados (la Cloud API es
+// solo-envío) — esto es enteramente nuestro propio registro (WhatsappOtpService
+// escribe una fila por intento en cada enviarXxx, vía PersistenceService.registrarMensajeWhatsapp).
+app.get('/api/admin/solicitudes/:id/mensajes', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const mensajes = await PersistenceService.getMensajesDeSolicitud(id);
+    return res.status(200).json(mensajes);
+  } catch (error: any) {
+    console.error('Error al consultar el historial de mensajes:', error.message);
+    return res.status(500).json({ error: error.message || 'No se pudo consultar el historial de mensajes.' });
   }
 });
 
@@ -1048,7 +1081,7 @@ app.post('/api/admin/solicitudes/:id/cancelar', requireAdminAuth, async (req: Re
     const solicitudCancelada = await PersistenceService.cancelarSolicitud(id);
 
     try {
-      await WhatsappOtpService.enviarSolicitudCancelada(solicitud.celular, solicitud.cliente, solicitud.modelo);
+      await WhatsappOtpService.enviarSolicitudCancelada(solicitud.id, solicitud.celular, solicitud.cliente, solicitud.modelo);
     } catch (whatsappError: any) {
       console.error(`[Cancelar] No se pudo avisar la cancelación por WhatsApp a la solicitud ${id}: ${whatsappError.message}`);
     }
@@ -1472,7 +1505,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             await PersistenceService.programarProximoCobroSemanal(solicitud.id, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
             try {
-              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.id, solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
             }
@@ -1502,7 +1535,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // success_url) — sin este aviso, nadie le dice que ya puede volver a cargar
             // su domicilio. Mismo link que usa crear-orden-enganche para success_url.
             try {
-              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.id, solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
             }
@@ -1532,7 +1565,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
             // sirve si sigue frente a la pantalla: si cerró la pestaña o perdió señal al
             // volver, se quedaba sin ningún aviso ni forma de retomar el flujo.
             try {
-              await WhatsappOtpService.enviarConfirmacionPago(solicitud.celular, solicitud.cliente, linkContinuar);
+              await WhatsappOtpService.enviarConfirmacionPago(solicitud.id, solicitud.celular, solicitud.cliente, linkContinuar);
             } catch (whatsappError: any) {
               console.error(`[Stripe Webhook] No se pudo avisar la confirmación de pago por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
             }
@@ -1655,6 +1688,23 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
+      // Deduplicado por invoice.id + attempt_count: Stripe garantiza entrega "al menos
+      // una vez" de sus webhooks, y una redelivery de este evento en particular coincide
+      // típicamente con un restart del backend (Railway no llegó a responder 200 antes
+      // de bajar, o el evento quedó en cola durante el tiempo que el server estuvo abajo
+      // y Stripe lo reintenta apenas vuelve a levantar) — sin este chequeo, cada
+      // redelivery volvía a mandar el WhatsApp Y generaba un link de reintento de
+      // tarjeta nuevo en Stripe, no solo a duplicar una fila del historial. A diferencia
+      // de invoice.paid (dedup por invoice.id solo, porque una factura se paga una sola
+      // vez), acá se necesita también attempt_count: Smart Retries sí vuelve a fallar la
+      // MISMA invoice varios días seguidos, y cada intento real sigue queriendo avisar.
+      const attemptCount = Number(invoice.attempt_count || 0);
+      const esNuevo = await PersistenceService.registrarFalloInvoiceSiNuevo(solicitudId, invoice.id, attemptCount);
+      if (!esNuevo) {
+        console.log(`[Stripe Webhook] invoice.payment_failed ${invoice.id} (intento ${attemptCount}) de la solicitud ${solicitudId} ya se había procesado antes — reintento del webhook, se ignora.`);
+        return res.status(200).json({ received: true });
+      }
+
       console.warn(`[Stripe Webhook] Falló el cobro automático de tarjeta para la solicitud ${solicitudId} (invoice ${invoice.id}).`);
       await PersistenceService.marcarCobroSemanalFallido(solicitudId);
 
@@ -1681,7 +1731,7 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
           ALLOWED_ORIGINS[0],
           usarProduccion
         );
-        await WhatsappOtpService.enviarLinkReintentoTarjeta(solicitud.celular, solicitud.cliente, url, Number(solicitud.pago_semanal), numeroSemana);
+        await WhatsappOtpService.enviarLinkReintentoTarjeta(solicitud.id, solicitud.celular, solicitud.cliente, url, Number(solicitud.pago_semanal), numeroSemana);
         console.log(`[Stripe Webhook] Link de reintento de tarjeta generado y enviado para la solicitud ${solicitudId}.`);
       } catch (fallbackError: any) {
         console.error(`[Stripe Webhook] No se pudo generar/enviar el link de reintento de tarjeta para la solicitud ${solicitudId}: ${fallbackError.message}`);
@@ -1826,7 +1876,7 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
       await PersistenceService.registrarFalloVerificamex(solicitud.id, result, comentarioMismatch, errores);
       await PersistenceService.escalarRevisionManual(solicitud.id);
       try {
-        await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
+        await WhatsappOtpService.enviarVerificacionRevision(solicitud.id, solicitud.celular, solicitud.cliente);
       } catch (whatsappError: any) {
         console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
       }
@@ -1861,7 +1911,7 @@ async function procesarResultadoVerificamex(solicitud: any, status: string | und
   // historial/auditoría, ya no como gate para decidir cuándo escalar.
   await PersistenceService.escalarRevisionManual(solicitud.id);
   try {
-    await WhatsappOtpService.enviarVerificacionRevision(solicitud.celular, solicitud.cliente);
+    await WhatsappOtpService.enviarVerificacionRevision(solicitud.id, solicitud.celular, solicitud.cliente);
   } catch (whatsappError: any) {
     console.error(`[Verificación] No se pudo avisar la revisión manual por WhatsApp a la solicitud ${solicitud.id}: ${whatsappError.message}`);
   }

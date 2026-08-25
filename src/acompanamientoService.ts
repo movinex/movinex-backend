@@ -60,13 +60,13 @@ export class AcompanamientoService {
     const link = `${origin}/documentos?solicitud=${s.id}`;
 
     if (faltanDatosODireccion) {
-      await WhatsappOtpService.enviarDatosPendientes(s.celular, s.modelo, link);
+      await WhatsappOtpService.enviarDatosPendientes(s.id, s.celular, s.modelo, link);
       await PersistenceService.registrarRecordatorioEnviado(s.id, 'datos_pendientes');
       return;
     }
 
     if (!s.acepta_terminos) {
-      await WhatsappOtpService.enviarTerminosPendientes(s.celular, s.cliente, s.modelo, link);
+      await WhatsappOtpService.enviarTerminosPendientes(s.id, s.celular, s.cliente, s.modelo, link);
       await PersistenceService.registrarRecordatorioEnviado(s.id, 'terminos_pendientes');
     }
   }
@@ -78,7 +78,7 @@ export class AcompanamientoService {
     if (!this.puedeRecordar(s, ahora, transcurrido)) return;
 
     const link = `${origin}/documentos?solicitud=${s.id}`;
-    await WhatsappOtpService.enviarPagoPendiente(s.celular, s.cliente, s.modelo, Number(s.enganche), link);
+    await WhatsappOtpService.enviarPagoPendiente(s.id, s.celular, s.cliente, s.modelo, Number(s.enganche), link);
     await PersistenceService.registrarRecordatorioEnviado(s.id, 'pago_pendiente');
   }
 
@@ -96,7 +96,7 @@ export class AcompanamientoService {
     if (!this.puedeRecordar(s, ahora, transcurrido)) return;
 
     const link = `${origin}/verificacion?solicitud=${s.id}&modelo=${encodeURIComponent(s.modelo)}`;
-    await WhatsappOtpService.enviarVerificacionPendiente(s.celular, s.cliente, s.modelo, link);
+    await WhatsappOtpService.enviarVerificacionPendiente(s.id, s.celular, s.cliente, s.modelo, link);
     await PersistenceService.registrarRecordatorioEnviado(s.id, 'verificacion_pendiente');
   }
 }

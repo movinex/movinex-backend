@@ -67,11 +67,15 @@ export class WhatsappOtpService {
   static async enviarCodigo(celular: string): Promise<{ mock: boolean }> {
     const codigo = this.generarCodigo();
     const expiraEn = new Date(Date.now() + OTP_TTL_MINUTOS * 60 * 1000);
+    const tipo = 'OTP verificación';
 
     await PersistenceService.guardarOtp(celular, codigo, expiraEn);
 
     if (this.MOCK) {
       console.log(`[WhatsApp OTP MOCK] Código para ${celular}: ${codigo} (válido ${OTP_TTL_MINUTOS} min)`);
+      // Sin solicitudId: todavía no existe la solicitud a esta altura del flujo —
+      // POST /api/solicitudes[/iniciar] la adopta apenas se crea (ver vincularMensajesPendientes).
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -99,9 +103,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp OTP] Código enviado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp OTP] Error al enviar el código:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId: undefined, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el código de verificación por WhatsApp.');
     }
   }
@@ -118,14 +124,17 @@ export class WhatsappOtpService {
    * plantilla `WHATSAPP_COBRO_SPEI_TEMPLATE_NAME`, con la CLABE como texto plano en el body.
    */
   static async enviarRecordatorioPagoSemanal(
+    solicitudId: string,
     celular: string,
     cliente: string,
     clabe: string,
     monto: number,
     numeroSemana: number
   ): Promise<{ mock: boolean }> {
+    const tipo = 'Cobro semanal (SPEI)';
     if (this.MOCK) {
       console.log(`[WhatsApp Cobro Semanal MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN a la CLABE ${clabe}`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -160,9 +169,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Cobro Semanal] Recordatorio de la semana #${numeroSemana} enviado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Cobro Semanal] Error al enviar el recordatorio:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el recordatorio de pago semanal por WhatsApp.');
     }
   }
@@ -177,9 +188,11 @@ export class WhatsappOtpService {
    * botón de WhatsApp solo admite variar un sufijo fijo sobre un dominio fijo, y este
    * link lleva una query string completa (?solicitud=X&modelo=Y).
    */
-  static async enviarConfirmacionPago(celular: string, cliente: string, link: string): Promise<{ mock: boolean }> {
+  static async enviarConfirmacionPago(solicitudId: string, celular: string, cliente: string, link: string): Promise<{ mock: boolean }> {
+    const tipo = 'Pago confirmado';
     if (this.MOCK) {
       console.log(`[WhatsApp Pago Confirmado MOCK] ${celular} (${cliente}) — link para continuar: ${link}`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -212,9 +225,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Pago Confirmado] Confirmación de pago enviada a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Pago Confirmado] Error al enviar la confirmación:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar la confirmación de pago por WhatsApp.');
     }
   }
@@ -227,14 +242,17 @@ export class WhatsappOtpService {
    * distinto (manda un link, no una CLABE) — `WHATSAPP_COBRO_OXXO_TEMPLATE_NAME`.
    */
   static async enviarLinkPagoSemanalOxxo(
+    solicitudId: string,
     celular: string,
     cliente: string,
     link: string,
     monto: number,
     numeroSemana: number
   ): Promise<{ mock: boolean }> {
+    const tipo = 'Cobro semanal (OXXO)';
     if (this.MOCK) {
       console.log(`[WhatsApp Cobro Semanal OXXO MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN, link: ${link}`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -269,9 +287,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Cobro Semanal OXXO] Link de la semana #${numeroSemana} enviado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Cobro Semanal OXXO] Error al enviar el link:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el link de pago semanal (OXXO) por WhatsApp.');
     }
   }
@@ -283,14 +303,17 @@ export class WhatsappOtpService {
    * queda en modo mock como cualquier plantilla sin aprobar.
    */
   static async enviarLinkReintentoTarjeta(
+    solicitudId: string,
     celular: string,
     cliente: string,
     link: string,
     monto: number,
     numeroSemana: number
   ): Promise<{ mock: boolean }> {
+    const tipo = 'Cobro tarjeta fallida';
     if (this.MOCK) {
       console.log(`[WhatsApp Cobro Tarjeta Fallida MOCK] ${celular} (${cliente}) — semana #${numeroSemana}, $${monto} MXN, link: ${link}`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -325,9 +348,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Cobro Tarjeta Fallida] Link de reintento de la semana #${numeroSemana} enviado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Cobro Tarjeta Fallida] Error al enviar el link:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el link de reintento de tarjeta por WhatsApp.');
     }
   }
@@ -337,9 +362,11 @@ export class WhatsappOtpService {
    * "Enviado" (paquete ya en manos de la paquetería) — avisa al cliente que su equipo
    * va en camino. Pedido de un compañero del equipo (vía WhatsApp interno, 10/08).
    */
-  static async enviarPedidoEnviado(celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+  static async enviarPedidoEnviado(solicitudId: string, celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+    const tipo = 'Pedido enviado';
     if (this.MOCK) {
       console.log(`[WhatsApp Pedido Enviado MOCK] ${celular} (${cliente}) — ${modelo} en camino.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -372,9 +399,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Pedido Enviado] Aviso de envío mandado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Pedido Enviado] Error al enviar el aviso:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el aviso de envío por WhatsApp.');
     }
   }
@@ -385,9 +414,11 @@ export class WhatsappOtpService {
    * 2026-08-14, cron de verificación de entregas). Necesita su propia plantilla nueva
    * en WhatsApp Manager (`WHATSAPP_ENTREGADO_TEMPLATE_NAME`, sin dar de alta todavía).
    */
-  static async enviarPedidoEntregado(celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+  static async enviarPedidoEntregado(solicitudId: string, celular: string, cliente: string, modelo: string): Promise<{ mock: boolean }> {
+    const tipo = 'Pedido entregado';
     if (this.MOCK) {
       console.log(`[WhatsApp Pedido Entregado MOCK] ${celular} (${cliente}) — ${modelo} entregado.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -420,9 +451,11 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp Pedido Entregado] Aviso de entrega mandado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error('[WhatsApp Pedido Entregado] Error al enviar el aviso:', error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo, exito: false, mock: false, detalle: error.message });
       throw new Error('No se pudo enviar el aviso de entrega por WhatsApp.');
     }
   }
@@ -435,6 +468,7 @@ export class WhatsappOtpService {
    * están arriba, sin migrarlas a este helper.
    */
   private static async enviarTemplateSimple(
+    solicitudId: string,
     celular: string,
     templateName: string,
     parametros: string[],
@@ -442,6 +476,7 @@ export class WhatsappOtpService {
   ): Promise<{ mock: boolean }> {
     if (this.MOCK) {
       console.log(`[WhatsApp ${logLabel} MOCK] ${celular} — plantilla "${templateName}": ${JSON.stringify(parametros)}`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo: logLabel, exito: true, mock: true });
       return { mock: true };
     }
 
@@ -468,51 +503,53 @@ export class WhatsappOtpService {
         }
       );
       console.log(`[WhatsApp ${logLabel}] Enviado a ${celular}.`);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo: logLabel, exito: true, mock: false });
       return { mock: false };
     } catch (error: any) {
       console.error(`[WhatsApp ${logLabel}] Error al enviar:`, error.response?.data || error.message);
+      await PersistenceService.registrarMensajeWhatsapp({ solicitudId, celular, tipo: logLabel, exito: false, mock: false, detalle: error.message });
       throw new Error(`No se pudo enviar el mensaje de WhatsApp (${logLabel}).`);
     }
   }
 
   // Paso 2→3-4: verificó el OTP pero no completó datos/dirección.
-  static async enviarDatosPendientes(celular: string, modelo: string, link: string) {
-    return this.enviarTemplateSimple(celular, this.DATOS_PENDIENTES_TEMPLATE_NAME, [modelo, link], 'Datos Pendientes');
+  static async enviarDatosPendientes(solicitudId: string, celular: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.DATOS_PENDIENTES_TEMPLATE_NAME, [modelo, link], 'Datos Pendientes');
   }
 
   // Paso 4→5: completó datos/dirección pero no el 2do OTP + términos.
-  static async enviarTerminosPendientes(celular: string, cliente: string, modelo: string, link: string) {
-    return this.enviarTemplateSimple(celular, this.TERMINOS_PENDIENTES_TEMPLATE_NAME, [cliente, modelo, link], 'Términos Pendientes');
+  static async enviarTerminosPendientes(solicitudId: string, celular: string, cliente: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.TERMINOS_PENDIENTES_TEMPLATE_NAME, [cliente, modelo, link], 'Términos Pendientes');
   }
 
   // Paso 5→6: aceptó términos pero no pagó el enganche — el más urgente antes de cobrar.
-  static async enviarPagoPendiente(celular: string, cliente: string, modelo: string, monto: number, link: string) {
-    return this.enviarTemplateSimple(celular, this.PAGO_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, monto.toLocaleString('es-MX'), link], 'Pago Pendiente');
+  static async enviarPagoPendiente(solicitudId: string, celular: string, cliente: string, modelo: string, monto: number, link: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.PAGO_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, monto.toLocaleString('es-MX'), link], 'Pago Pendiente');
   }
 
   // Paso 6→7: ya pagó pero no completó la verificación en vivo — plata ya cobrada sin cerrar el ciclo.
-  static async enviarVerificacionPendiente(celular: string, cliente: string, modelo: string, link: string) {
-    return this.enviarTemplateSimple(celular, this.VERIFICACION_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, link], 'Verificación Pendiente');
+  static async enviarVerificacionPendiente(solicitudId: string, celular: string, cliente: string, modelo: string, link: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.VERIFICACION_PENDIENTE_TEMPLATE_NAME, [cliente, modelo, link], 'Verificación Pendiente');
   }
 
   // La sesión de Verificamex terminó FINISHED.
-  static async enviarVerificacionAprobada(celular: string, cliente: string, modelo: string) {
-    return this.enviarTemplateSimple(celular, this.VERIFICACION_APROBADA_TEMPLATE_NAME, [cliente, modelo], 'Verificación Aprobada');
+  static async enviarVerificacionAprobada(solicitudId: string, celular: string, cliente: string, modelo: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.VERIFICACION_APROBADA_TEMPLATE_NAME, [cliente, modelo], 'Verificación Aprobada');
   }
 
   // FAILED con intentos disponibles — respaldo por si no reintentó solo desde la app.
-  static async enviarVerificacionReintentar(celular: string, cliente: string, link: string) {
-    return this.enviarTemplateSimple(celular, this.VERIFICACION_REINTENTAR_TEMPLATE_NAME, [cliente, link], 'Verificación Reintentar');
+  static async enviarVerificacionReintentar(solicitudId: string, celular: string, cliente: string, link: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.VERIFICACION_REINTENTAR_TEMPLATE_NAME, [cliente, link], 'Verificación Reintentar');
   }
 
   // 3er FAILED seguido — pasa a revisión manual, sin más reintentos.
-  static async enviarVerificacionRevision(celular: string, cliente: string) {
-    return this.enviarTemplateSimple(celular, this.VERIFICACION_REVISION_TEMPLATE_NAME, [cliente], 'Verificación Revisión');
+  static async enviarVerificacionRevision(solicitudId: string, celular: string, cliente: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.VERIFICACION_REVISION_TEMPLATE_NAME, [cliente], 'Verificación Revisión');
   }
 
   // El admin usó el botón "Cancelar solicitud".
-  static async enviarSolicitudCancelada(celular: string, cliente: string, modelo: string) {
-    return this.enviarTemplateSimple(celular, this.SOLICITUD_CANCELADA_TEMPLATE_NAME, [cliente, modelo], 'Solicitud Cancelada');
+  static async enviarSolicitudCancelada(solicitudId: string, celular: string, cliente: string, modelo: string) {
+    return this.enviarTemplateSimple(solicitudId, celular, this.SOLICITUD_CANCELADA_TEMPLATE_NAME, [cliente, modelo], 'Solicitud Cancelada');
   }
 
   static async verificarCodigo(celular: string, codigo: string): Promise<boolean> {

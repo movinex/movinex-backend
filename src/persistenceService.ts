@@ -513,6 +513,35 @@ export class PersistenceService {
     if (error) throw error;
   }
 
+  // Compare-and-swap para invoice.payment_failed, mismo problema que reclamarCobroSemanal
+  // pero del lado de los fallos: Stripe garantiza entrega "al menos una vez" de sus
+  // webhooks, y una redelivery típicamente coincide con un restart del backend (Railway
+  // no llegó a responder 200 antes de reiniciar, o el evento quedó en cola durante el
+  // tiempo que el server estuvo abajo y Stripe lo reintenta apenas vuelve a levantar).
+  // A diferencia de invoice.paid (que ya dedupea por invoice.id porque una factura solo
+  // se paga una vez), una misma invoice puede fallar de verdad más de una vez — Smart
+  // Retries reintenta el cobro varios días seguidos — así que la clave es invoice.id +
+  // attempt_count, no invoice.id solo: eso permite un aviso por cada intento fallido
+  // real, pero bloquea que la MISMA entrega repetida del webhook mande el WhatsApp y
+  // genere un link de reintento de tarjeta nuevo cada vez que el proceso reinicia.
+  static async registrarFalloInvoiceSiNuevo(id: string, invoiceId: string, attemptCount: number): Promise<boolean> {
+    const clave = `${invoiceId}_${attemptCount}`;
+    const solicitud = await this.getSolicitudById(id);
+    if (!solicitud) throw new Error(`Solicitud ${id} no encontrada.`);
+
+    if (solicitud.ultima_invoice_fallida === clave) {
+      return false;
+    }
+
+    const { error } = await supabase
+      .from('solicitudes')
+      .update({ ultima_invoice_fallida: clave })
+      .eq('id', id);
+
+    if (error) throw error;
+    return true;
+  }
+
   // Trae las solicitudes que pagaron el enganche por SPEI (customer_balance) y les toca
   // recordatorio hoy — cobrosSemanalesService les reenvía la misma CLABE persistente,
   // que sí es válida para SPEI (confirmado contra la documentación de Stripe:
@@ -634,6 +663,117 @@ export class PersistenceService {
       console.error(`[Pagos] No se pudo registrar el pago ${pago.stripeId}:`, error.message);
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Historial de mensajes de WhatsApp (tabla `mensajes_whatsapp`) — un renglón por
+  // cada intento de envío (exitoso o fallido) hecho por WhatsappOtpService, para poder
+  // mostrar en el detalle de la solicitud (/sadmin) qué se le mandó y cuándo. Meta no
+  // expone ningún endpoint para consultar mensajes ya enviados (la Cloud API es
+  // solo-envío, sin historial vía API) — este es el único registro que existe.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * **Nunca lanza.** Igual que registrarPago: dejar la traza de un mensaje no puede
+   * tumbar el envío real, que ya ocurrió (o falló, y eso también se quiere loguear)
+   * para cuando esto se llama. `solicitudId` viene vacío en el único mensaje que se
+   * manda antes de que exista la solicitud (el OTP de verificación de teléfono) — ese
+   * caso simplemente no deja traza, porque no hay a qué solicitud asociarlo todavía.
+   */
+  static async registrarMensajeWhatsapp(mensaje: {
+    solicitudId: string | undefined;
+    celular: string;
+    tipo: string;
+    exito: boolean;
+    mock: boolean;
+    detalle?: string;
+  }): Promise<void> {
+    try {
+      const { error } = await supabase.from('mensajes_whatsapp').insert({
+        // El OTP se manda antes de que exista la solicitud — queda sin dueño
+        // (solicitud_id null) hasta que vincularMensajesPendientes lo adopte, apenas se
+        // crea la solicitud con ese mismo celular (ver POST /api/solicitudes[/iniciar]).
+        solicitud_id: mensaje.solicitudId ?? null,
+        celular: mensaje.celular,
+        tipo: mensaje.tipo,
+        exito: mensaje.exito,
+        mock: mensaje.mock,
+        detalle: mensaje.detalle ?? null
+      });
+
+      if (error) throw error;
+    } catch (error: any) {
+      console.error(`[Mensajes WhatsApp] No se pudo registrar el mensaje "${mensaje.tipo}" (solicitud ${mensaje.solicitudId ?? 'sin asignar'}):`, error.message);
+    }
+  }
+
+  /**
+   * Adopta los mensajes de WhatsApp que se mandaron antes de que esta solicitud
+   * existiera (hoy, solo el OTP de verificación de teléfono) — se llama justo después
+   * de crear la solicitud, con el mismo celular. Nunca lanza: no vincular un mensaje
+   * viejo no puede tumbar la creación de la solicitud, que ya ocurrió.
+   */
+  static async vincularMensajesPendientes(celular: string, solicitudId: string): Promise<void> {
+    try {
+      const { error } = await supabase
+        .from('mensajes_whatsapp')
+        .update({ solicitud_id: solicitudId })
+        .eq('celular', celular)
+        .is('solicitud_id', null);
+
+      if (error) throw error;
+    } catch (error: any) {
+      console.error(`[Mensajes WhatsApp] No se pudieron vincular los mensajes previos de ${celular} a la solicitud ${solicitudId}:`, error.message);
+    }
+  }
+
+  /**
+   * Igual que registrarMensajeWhatsapp, pero para el backfill (ver scripts/backfillMensajesWhatsapp.ts):
+   * reconstruye mensajes de ANTES de que esta tabla existiera, a partir de otras fuentes
+   * ya guardadas (`pagos` para tarjeta fallida, `pago_confirmado_at` para pago
+   * confirmado) — no es un registro directo del envío, es inferido. `fuenteId` es
+   * `pagos.stripe_id` o una clave armada a mano; UNIQUE en la tabla (a diferencia de
+   * `registrarMensajeWhatsapp`, que no tiene ninguna clave — un envío en vivo no
+   * necesita dedup, cada llamada es un mensaje real distinto) para que correr el script
+   * dos veces no duplique filas.
+   */
+  static async registrarMensajeWhatsappBackfill(mensaje: {
+    solicitudId: string;
+    celular: string;
+    tipo: string;
+    creadoEn: Date;
+    fuenteId: string;
+  }): Promise<boolean> {
+    const { data, error } = await supabase
+      .from('mensajes_whatsapp')
+      .upsert(
+        {
+          solicitud_id: mensaje.solicitudId,
+          celular: mensaje.celular,
+          tipo: mensaje.tipo,
+          exito: true,
+          mock: false,
+          detalle: 'Reconstruido por backfill a partir de otro registro — no es la confirmación directa del envío.',
+          creado_en: mensaje.creadoEn.toISOString(),
+          fuente_id: mensaje.fuenteId
+        },
+        { onConflict: 'fuente_id', ignoreDuplicates: true }
+      )
+      .select();
+
+    if (error) throw error;
+    return (data || []).length > 0;
+  }
+
+  static async getMensajesDeSolicitud(solicitudId: string) {
+    const { data, error } = await supabase
+      .from('mensajes_whatsapp')
+      .select('*')
+      .eq('solicitud_id', solicitudId)
+      .order('creado_en', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
   }
 
   // ── Créditos y rechazos: un CURP = un crédito activo ──────────────────────────────
@@ -863,6 +1003,22 @@ export class PersistenceService {
     const { data, error } = await supabase
       .from('solicitudes')
       .update({ imei })
+      .eq('id', id)
+      .select();
+
+    if (error) throw error;
+    return data[0];
+  }
+
+  // Corrige el número al que le llegan las alertas de una solicitud (typo al cargar el
+  // formulario, cliente cambió de número, etc.) — se usa desde el detalle de la
+  // solicitud en /sadmin. No reabre el OTP ni revalida nada: es solo el destino de los
+  // WhatsApp futuros (cobro, verificación, entrega...), el número con el que el cliente
+  // verificó su identidad en su momento no cambia retroactivamente.
+  static async guardarCelular(id: string, celular: string) {
+    const { data, error } = await supabase
+      .from('solicitudes')
+      .update({ celular })
       .eq('id', id)
       .select();
 
