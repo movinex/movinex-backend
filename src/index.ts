@@ -1091,6 +1091,42 @@ app.post('/api/admin/solicitudes/:id/link-pago-tarjeta', requireAdminAuth, async
   }
 });
 
+// POST: genera a mano un voucher OXXO para el cobro semanal de una solicitud — mismo
+// mecanismo que corre el cron cada semana (StripeService.crearPagoSemanalOxxo), pero
+// disponible desde el panel sin esperar al pase diario de las 9am. A diferencia de SPEI
+// (CLABE fija reutilizable), OXXO no admite una referencia estable, así que cada llamada
+// crea un voucher nuevo — es el comportamiento normal, no un problema: el cliente puede
+// pagar cualquiera y el webhook los concilia por metadata.solicitud_id. El link no se
+// manda solo por WhatsApp acá — se devuelve para que el admin lo copie y lo mande.
+app.post('/api/admin/solicitudes/:id/link-pago-oxxo', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const solicitud = await PersistenceService.getSolicitudById(id);
+    if (!solicitud) {
+      return res.status(404).json({ error: 'Solicitud no encontrada.' });
+    }
+    if (solicitud.metodo_pago_enganche !== 'oxxo' || !solicitud.stripe_customer_id) {
+      return res.status(409).json({ error: 'Esta solicitud no pagó el enganche con OXXO.' });
+    }
+
+    const usarProduccion = StripeService.usaProduccion(solicitud.email);
+    const numeroSemana = Number(solicitud.semanas_pagadas || 0) + 1;
+    const { url } = await StripeService.crearPagoSemanalOxxo(
+      id,
+      solicitud.stripe_customer_id,
+      Number(solicitud.pago_semanal),
+      numeroSemana,
+      ALLOWED_ORIGINS[0],
+      usarProduccion
+    );
+
+    return res.status(200).json({ url });
+  } catch (error: any) {
+    console.error('Error al generar el voucher OXXO:', error.message);
+    return res.status(500).json({ error: error.message || 'No se pudo generar el link de pago.' });
+  }
+});
+
 app.post('/api/admin/solicitudes/:id/cancelar', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -2040,12 +2076,19 @@ app.post('/api/admin/entregas/procesar', requireAdminAuth, async (req: Request, 
   }
 });
 
-// Cron diario (9am hora de Ciudad de México) que manda los recordatorios/vouchers de
-// pago semanal pendientes por WhatsApp a quienes pagaron el enganche con OXXO/SPEI —
-// ver cobrosSemanalesService.ts (SPEI reenvía la misma CLABE, OXXO genera un voucher
-// nuevo cada vez). Corre en el mismo proceso porque Railway mantiene este servidor
-// Express siempre corriendo (no es una función serverless).
-cron.schedule('0 9 * * *', () => {
+// Cron dos veces al día (9am y 9pm hora de Ciudad de México) que manda los
+// recordatorios/vouchers de pago semanal pendientes por WhatsApp a quienes pagaron el
+// enganche con OXXO/SPEI — ver cobrosSemanalesService.ts (SPEI reenvía la misma CLABE,
+// OXXO genera un voucher nuevo cada vez). El segundo pase de las 21:00 (pedido de
+// Eduardo 2026-08-28) achica la ventana entre que un cobro "vence" y que el cliente
+// recibe el link: un vencimiento a media mañana ya no espera hasta el otro día.
+// Correrlo dos veces es seguro y no duplica nada: `reclamarCobroSemanal` avanza
+// `proximo_cobro_semanal` +7 días de forma atómica al mandar el aviso, así que el
+// segundo pase del mismo día ya no lo agarra; y una vez que el plan está pagado
+// (`semanas_pagadas >= semanas`) el filtro de getSolicitudesConCobro*Pendiente lo
+// excluye. Corre en el mismo proceso porque Railway mantiene este servidor Express
+// siempre corriendo (no es una función serverless).
+cron.schedule('0 9,21 * * *', () => {
   console.log('[Cron] Procesando cobros semanales pendientes...');
   CobrosSemanalesService.procesarPendientes().catch((error) => {
     console.error('[Cron] Error al procesar cobros semanales (SPEI):', error.message);
