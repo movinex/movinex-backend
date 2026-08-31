@@ -688,7 +688,7 @@ app.post('/api/solicitudes/:id/crear-sesion-verificamex', async (req: Request, r
     const webhookUrl = `${BACKEND_URL}/api/webhooks/verificamex`;
 
     const sesion = await VerificamexService.crearSesionVerificacion(id, solicitud.email, redirectUrl, webhookUrl);
-    await PersistenceService.guardarSesionVerificamex(id, sesion.sessionId || `sin-id-${id}`);
+    await PersistenceService.guardarSesionVerificamex(id, sesion.sessionId || `sin-id-${id}`, sesion.formUrl || undefined);
 
     if (sesion.mock) {
       // No hay página hosteada real que mostrar en mock — se resuelve como aprobada al
@@ -1915,7 +1915,8 @@ app.get('/api/solicitudes/:id/estado-verificacion', async (req: Request, res: Re
       estatus: solicitud.estatus,
       pagoConfirmado: solicitud.pago_confirmado === true,
       verificamexStatus: solicitud.verificamex_status || null,
-      verificamexIntentos: Number(solicitud.verificamex_intentos || 0)
+      verificamexIntentos: Number(solicitud.verificamex_intentos || 0),
+      verificamexFormUrl: solicitud.verificamex_form_url || null
     });
   } catch (error: any) {
     console.error('Error al consultar el estado de la verificación:', error);

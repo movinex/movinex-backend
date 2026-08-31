@@ -254,10 +254,10 @@ export class PersistenceService {
   // Paso 7: guarda el id de la VerificationSession recién creada (primer intento o
   // reintento) — no toca verificamex_intentos, ese contador es acumulado a lo largo de
   // toda la solicitud, no por sesión.
-  static async guardarSesionVerificamex(id: string, sessionId: string) {
+  static async guardarSesionVerificamex(id: string, sessionId: string, formUrl?: string) {
     const { data, error } = await supabase
       .from('solicitudes')
-      .update({ verificamex_session_id: sessionId, verificamex_status: 'OPEN' })
+      .update({ verificamex_session_id: sessionId, verificamex_status: 'OPEN', verificamex_form_url: formUrl || null })
       .eq('id', id)
       .select();
 
