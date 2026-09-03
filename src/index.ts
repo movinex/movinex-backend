@@ -1511,33 +1511,48 @@ app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), asyn
         return res.status(200).json({ received: true });
       }
 
-      // Un voucher semanal de OXXO (StripeService.crearPagoSemanalOxxo) dispara este
-      // mismo evento — hay que procesarlo distinto del enganche: solo cuenta la semana
-      // pagada, no toca pago_confirmado ni intenta armar ninguna Subscription.
+      // Un voucher semanal de OXXO (StripeService.crearPagoSemanalOxxo) o un link de
+      // reintento de tarjeta (StripeService.crearLinkReintentoTarjeta, tras un
+      // invoice.payment_failed) disparan este mismo evento — hay que procesarlos
+      // distinto del enganche: solo cuenta la semana pagada, no toca pago_confirmado ni
+      // intenta armar ninguna Subscription. Se distinguen por payment_method_types
+      // porque ambos comparten metadata.tipo: 'cobro_semanal'.
       if (session.metadata?.tipo === 'cobro_semanal') {
+        const esTarjeta = (session.payment_method_types || []).includes('card');
         const resultado = await PersistenceService.registrarPagoSemanalManual(solicitudId, session.id);
         if (resultado.yaProcesada) {
-          console.log(`[Stripe Webhook] Voucher OXXO ${session.id} de la solicitud ${solicitudId} ya se había procesado — reintento del webhook, se ignora.`);
+          console.log(`[Stripe Webhook] Pago semanal manual ${session.id} de la solicitud ${solicitudId} ya se había procesado — reintento del webhook, se ignora.`);
           return res.status(200).json({ received: true });
         }
-        console.log(`[Stripe Webhook] Pago semanal OXXO confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
-        // Las semanas de OXXO no generan invoice (cada una es una Session suelta), así
-        // que esta es la única forma de que queden en el historial.
+        console.log(`[Stripe Webhook] Pago semanal manual (${esTarjeta ? 'tarjeta' : 'OXXO'}) confirmado para la solicitud ${solicitudId} (${resultado.semanas_pagadas}/${resultado.semanas}).`);
+        // Las semanas de OXXO/link de reintento no generan invoice (cada una es una
+        // Session suelta), así que esta es la única forma de que queden en el historial.
         await PersistenceService.registrarPago({
           solicitudId,
           tipo: 'semanal',
           numeroSemana: Number(session.metadata?.numero_semana) || resultado.semanas_pagadas,
           monto: Number(session.amount_total || 0) / 100,
           fecha: new Date(),
-          metodo: 'oxxo',
+          metodo: esTarjeta ? 'card' : 'oxxo',
           stripeId: session.id
         });
 
-        // OXXO no tiene Subscription que cancelar (ver comentario más abajo), pero el
-        // CURP igual tiene que liberarse cuando termina de pagar por este método.
+        // El link de reintento de tarjeta paga la MISMA semana que dejó marcada
+        // invoice.payment_failed — sin esto, Cobranza seguía mostrando la solicitud como
+        // fallida (y el recordatorio se seguía mandando) aunque el cliente ya hubiera
+        // pagado por este camino alternativo. invoice.paid limpia esto mismo para el
+        // cobro automático; acá hace falta el equivalente para el cobro manual. OXXO no
+        // usa cobro_semanal_fallido (nunca lo marca), pero programar la próxima fecha no
+        // le hace daño.
+        if (resultado.semanas_pagadas < resultado.semanas) {
+          await PersistenceService.programarProximoCobroSemanal(solicitudId, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+        }
+
+        // Ninguno de los dos tiene Subscription que cancelar (ver comentario más abajo),
+        // pero el CURP igual tiene que liberarse cuando termina de pagar por este método.
         if (resultado.semanas_pagadas >= resultado.semanas) {
           await PersistenceService.liquidarCredito(solicitudId);
-          console.log(`[Stripe Webhook] Plan completo por OXXO (${resultado.semanas_pagadas}/${resultado.semanas}) para la solicitud ${solicitudId} — crédito liquidado.`);
+          console.log(`[Stripe Webhook] Plan completo por pago manual (${resultado.semanas_pagadas}/${resultado.semanas}) para la solicitud ${solicitudId} — crédito liquidado.`);
         }
         return res.status(200).json({ received: true });
       }
